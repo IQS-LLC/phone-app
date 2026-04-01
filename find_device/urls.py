@@ -6,6 +6,5 @@ urlpatterns = [
     path('brightness/', views.set_brightness),
     path('fade/', views.set_fade),
     path('state/', views.get_state),
-    path('plc/init/', views.force_init),
+    path('init/', views.force_init),
 ]
-
