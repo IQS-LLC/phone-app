@@ -1,113 +1,134 @@
+"""
+PLC REST API views.
+
+Endpoints:
+  GET  /plc/                       health check
+  GET  /plc/state/                 full system state (all channels)
+  GET  /plc/devices/               device metadata (names, rooms)
+  POST /plc/dali/<ch>/brightness/  set one DALI channel (1-16)
+  POST /plc/dali/all/brightness/   set all DALI channels at once
+  POST /plc/relay/<ch>/            set one wall relay (1-4)
+
+All POST bodies are application/x-www-form-urlencoded.
+All responses are JSON.
+"""
+import logging
+
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .PLCLight import PLCLight
-import threading
-import logging
-import os
+from django.views.decorators.http import require_GET, require_POST
+
+from .plc.registry import DeviceRegistry
 
 logger = logging.getLogger(__name__)
 
-FADE_MAP = {
-    '0ms':    0,
-    '500ms':  500,
-    '1000ms': 1000,
-    '2000ms': 2000,
-    '5000ms': 5000,
-}
-DEFAULT_FADE = 2000
+
+def _registry() -> DeviceRegistry:
+    return DeviceRegistry.instance()
 
 
-class PLCManager:
-    _instance = None
-    _lock = threading.Lock()
-
-    def __init__(self):
-        plc_netid = os.getenv('PLC_NETID', '5.168.214.75.1.1')
-        plc_ip = os.getenv('PLC_IP', '192.168.0.161')
-        # Default to mock=True — only use real PLC if explicitly enabled
-        use_mock = os.getenv('PLC_MOCK', 'True').lower() == 'true'
-        self.plc = PLCLight(plc_netid, plc_ip, mock=use_mock)
-        self.connected = False
-
-    def connect(self):
-        try:
-            self.plc.connect()
-            self.connected = True
-            logger.info("PLC connected (mock=%s)", self.plc.mock)
-        except Exception as e:
-            self.connected = False
-            logger.error(f"PLC connection failed: {e}, switching to mock")
-            self.plc.mock = True
-            self.plc.connect()
-            self.connected = True
-
-    def get(self):
-        if not self.connected:
-            self.connect()
-        return self.plc
-
-    @classmethod
-    def instance(cls):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = PLCManager()
-            return cls._instance
-
+# ── Health ────────────────────────────────────────────────────────────────────
 
 def health(request):
-    return JsonResponse({'status': 'ok'})
+    r = _registry()
+    return JsonResponse({
+        'status':    'ok',
+        'mock':      r.mock,
+        'connected': r.connected,
+    })
 
 
-@csrf_exempt
-def set_brightness(request):
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST required'}, status=405)
-    try:
-        percent = int(request.POST.get('brightness', 0))
-        percent = max(0, min(100, percent))
-        plc = PLCManager.instance().get()
-        plc.set_brightness(percent)
-        return JsonResponse({'status': 'ok', 'brightness': percent})
-    except Exception as e:
-        logger.exception("Brightness error")
-        return JsonResponse({'error': str(e)}, status=500)
+# ── Full system state ─────────────────────────────────────────────────────────
 
-
-@csrf_exempt
-def set_fade(request):
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST required'}, status=405)
-    try:
-        fade_str = request.POST.get('fade', '2000ms')
-        fade_ms = FADE_MAP.get(fade_str, DEFAULT_FADE)
-        plc = PLCManager.instance().get()
-        plc.set_fade_time(fade_ms)
-        return JsonResponse({'status': 'ok', 'fade': fade_str, 'fade_ms': fade_ms})
-    except Exception as e:
-        logger.exception("Fade error")
-        return JsonResponse({'error': str(e)}, status=500)
-
-
+@require_GET
 def get_state(request):
     try:
-        plc = PLCManager.instance().get()
-        state = plc.read_state()
-        return JsonResponse(state)
-    except Exception as e:
-        logger.exception("State read error")
-        return JsonResponse({'error': str(e)}, status=500)
+        return JsonResponse(_registry().read_full_state())
+    except Exception as exc:
+        logger.exception("get_state error")
+        return JsonResponse({'error': str(exc)}, status=500)
 
+
+# ── Device metadata (names / rooms) ──────────────────────────────────────────
+
+@require_GET
+def get_devices(request):
+    r = _registry()
+    return JsonResponse({
+        'dali':    [d.to_dict() for d in r.all_dali()],
+        'relays':  [d.to_dict() for d in r.all_relays()],
+        'switches': [s.to_dict() for s in r.all_switches()],
+        'rooms':   r.rooms(),
+    })
+
+
+# ── DALI brightness — single channel ─────────────────────────────────────────
 
 @csrf_exempt
-def force_init(request):
-    if request.method != 'POST':
-        return JsonResponse({'error': 'POST required'}, status=405)
+@require_POST
+def set_dali_brightness(request, channel: int):
     try:
-        percent = int(request.POST.get('brightness', 50))
-        percent = max(1, min(100, percent))
-        plc = PLCManager.instance().get()
-        plc.force_initialize(percent)
-        return JsonResponse({'status': 'ok', 'initialized': True, 'brightness': percent})
-    except Exception as e:
-        logger.exception("Force init error")
-        return JsonResponse({'error': str(e)}, status=500)
+        pct = int(request.POST.get('brightness', 0))
+        pct = max(0, min(100, pct))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'brightness must be 0-100'}, status=400)
+
+    dev = _registry().dali(channel)
+    if dev is None:
+        return JsonResponse({'error': f'DALI channel {channel} not found'}, status=404)
+
+    try:
+        dev.set_brightness(pct)
+        return JsonResponse({'status': 'ok', 'channel': channel, 'brightness': pct})
+    except Exception as exc:
+        logger.exception("set_dali_brightness ch%d error", channel)
+        return JsonResponse({'error': str(exc)}, status=500)
+
+
+# ── DALI brightness — all channels at once ───────────────────────────────────
+
+@csrf_exempt
+@require_POST
+def set_dali_brightness_all(request):
+    try:
+        pct = int(request.POST.get('brightness', 0))
+        pct = max(0, min(100, pct))
+    except (TypeError, ValueError):
+        return JsonResponse({'error': 'brightness must be 0-100'}, status=400)
+
+    r = _registry()
+    errors = []
+    for dev in r.all_dali():
+        try:
+            dev.set_brightness(pct)
+        except Exception as exc:
+            errors.append(f'ch{dev.channel}: {exc}')
+            logger.error("set_all_brightness ch%d: %s", dev.channel, exc)
+
+    if errors:
+        return JsonResponse({'status': 'partial', 'errors': errors}, status=207)
+    return JsonResponse({'status': 'ok', 'brightness': pct})
+
+
+# ── Wall relay ────────────────────────────────────────────────────────────────
+
+@csrf_exempt
+@require_POST
+def set_relay(request, channel: int):
+    raw = request.POST.get('state', '').lower()
+    if raw not in ('true', 'false', '1', '0', 'on', 'off'):
+        return JsonResponse(
+            {'error': "state must be 'true'/'false'/'on'/'off'/'1'/'0'"}, status=400
+        )
+    on = raw in ('true', '1', 'on')
+
+    dev = _registry().relay(channel)
+    if dev is None:
+        return JsonResponse({'error': f'Relay channel {channel} not found'}, status=404)
+
+    try:
+        dev.set_state(on)
+        return JsonResponse({'status': 'ok', 'channel': channel, 'on': on})
+    except Exception as exc:
+        logger.exception("set_relay ch%d error", channel)
+        return JsonResponse({'error': str(exc)}, status=500)

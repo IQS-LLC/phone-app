@@ -8,7 +8,14 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-*1d*@ag1v$gle*x1f4bbc3nq9#
 DEBUG = os.getenv('DEBUG', 'True').lower() == 'true'
 
 
-ALLOWED_HOSTS = ['intolerable-appalledly-aleigha.ngrok-free.dev']
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    '0.0.0.0',
+    '192.168.0.158',   # LAN server IP (update if server moves)
+    'intolerable-appalledly-aleigha.ngrok-free.dev',
+    *[h for h in os.getenv('EXTRA_ALLOWED_HOSTS', '').split(',') if h],
+]
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 INSTALLED_APPS = [
