@@ -2,19 +2,34 @@
 PLC device abstractions built on top of ADSClient.
 
 Variable map — gvlDALI (DALI + relays + switches):
-  DALI dimmers (channel 1-16):
+  DALI dimmers (channel 1-28, hardware supports up to 28; 1-16 currently
+  configured in registry.py) — declared in gvlDALI but NOT YET WIRED into
+  the live POU.TcPOU CFC (see that file's TODO comments). Until wired, app
+  brightness commands write the GVL but have no effect on hardware, and
+  aPyActualLevel reads back stale/zero values:
     gvlDALI.aPyLevel[N]        BYTE   0-254   Python→PLC  desired level
     gvlDALI.aPySetLevel[N]     BOOL            Python→PLC  rising edge commits
     gvlDALI.aPyActualLevel[N]  BYTE   0-254   PLC→Python  confirmed readback
 
-  Wall relays (channel 1-16; Apt 16 uses channels 1-5):
+  Wall relays (channel 1-4; matches the 4 physical bRelay0-3 / KL2809
+  terminals — wired and live in WallLight_POU.TcPOU):
     gvlDALI.aPyWallRelay[N]      BOOL          Python→PLC  command
     gvlDALI.aPyWallRelayState[N] BOOL          PLC→Python  readback
 
   BTicino switches (index 1-48):
     gvlDALI.aPySwitchState[N]    BOOL          PLC→Python  live button state
+    NOTE: this array does not exist in either apartment's TwinCAT project.
+    SwitchInput reads will fail against a real (non-mock) PLC.
 
 Variable map — gvlIO (all other devices):
+  NONE OF THE BELOW HAS ANY BACKING HARDWARE in Apartment 16 or 8's EtherCAT
+  I/O configuration (no curtain motor terminals, no appliance relays, no
+  door/window contacts beyond the 4 already used by WallLight_POU, no
+  separate security I/O). There is no gvlIO GVL in either TwinCAT project.
+  CurtainMotor, ApplianceRelay, MagneticSensor, MotionSensor and
+  SecurityController will all fail reads/writes against a real PLC — they
+  only work in PLC_MOCK mode. Treat this whole section as a future-hardware
+  placeholder, not a working integration, until real terminals exist.
   Curtain motors (index 1-16):
     gvlIO.aPyCurtainCmd[N]     BYTE  0=stop 1=up 2=down   Python→PLC
     gvlIO.aPyCurtainState[N]   BYTE  0/1/2                PLC→Python readback
@@ -67,11 +82,19 @@ def byte_to_pct(b: int) -> int:
 # ── DaliChannel ───────────────────────────────────────────────────────────────
 
 class DaliChannel:
-    """Single Tridonic DALI dimmer channel (address 1-16)."""
+    """
+    Single Tridonic DALI dimmer channel. The DALI bus driven by POU.TcPOU
+    supports addresses 1-28 (28 fbDALI102DimmerNSwitch instances); 1-16 are
+    currently provisioned in ApartmentDevice rows, but the class itself
+    must accept the full hardware range so adding channel 17-28 later is a
+    DB row, not a code change.
+    """
+
+    MAX_CHANNEL = 28
 
     def __init__(self, channel: int, name: str, room: str, client):
-        if not 1 <= channel <= 16:
-            raise ValueError(f"DALI channel must be 1-16, got {channel}")
+        if not 1 <= channel <= self.MAX_CHANNEL:
+            raise ValueError(f"DALI channel must be 1-{self.MAX_CHANNEL}, got {channel}")
         self.channel = channel
         self.name    = name
         self.room    = room
@@ -84,6 +107,17 @@ class DaliChannel:
     def _var_set_level(self) -> str: return f'gvlDALI.aPySetLevel[{self.channel}]'
     @property
     def _var_actual(self)    -> str: return f'gvlDALI.aPyActualLevel[{self.channel}]'
+
+    # Public alias + decoder so DeviceRegistry can fold this var into a
+    # single ADS sum-read (read_list_by_name) across every DALI channel
+    # instead of one round trip per channel.
+    @property
+    def batch_var(self) -> str: return self._var_actual
+    batch_plctype = pyads.PLCTYPE_BYTE
+
+    @staticmethod
+    def decode_batch(raw: Any) -> int:
+        return byte_to_pct(int(raw))
 
     def set_brightness(self, percent: int):
         level = pct_to_byte(percent)
@@ -109,7 +143,8 @@ class DaliChannel:
 
 class WallRelay:
     """
-    Relay-driven wall light (channel 1-16; Apt 16 uses 1-5).
+    Relay-driven wall light (channel 1-16; only 4 physical relays exist
+    per apartment — bRelay0-3 / KL2809 — so 1-4 are in use).
 
     Maps to gvlDALI.aPyWallRelay[N] / aPyWallRelayState[N].
     """
@@ -127,6 +162,15 @@ class WallRelay:
     def _var_cmd(self)   -> str: return f'gvlDALI.aPyWallRelay[{self.channel}]'
     @property
     def _var_state(self) -> str: return f'gvlDALI.aPyWallRelayState[{self.channel}]'
+
+    # Public alias + decoder — see DaliChannel.batch_var.
+    @property
+    def batch_var(self) -> str: return self._var_state
+    batch_plctype = pyads.PLCTYPE_BOOL
+
+    @staticmethod
+    def decode_batch(raw: Any) -> bool:
+        return bool(raw)
 
     def set_state(self, on: bool):
         if self._client.mock:

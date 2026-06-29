@@ -22,6 +22,7 @@ ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
     "0.0.0.0",
+    "10.0.2.2",        # Android emulator's alias for the host machine
     "192.168.0.158",   # LAN server IP (Django host)
     "192.168.0.161",   # TwinCAT/PLC machine IP (Apartment 16)
     *[h.strip() for h in os.getenv("EXTRA_ALLOWED_HOSTS", "").split(",") if h.strip()],
@@ -50,7 +51,6 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     # Lumina middlewares
     "find_device.middleware.RateLimitMiddleware",
-    "find_device.middleware.APIKeyMiddleware",
     "find_device.middleware.RequestLoggingMiddleware",
     # Django built-ins
     "django.middleware.security.SecurityMiddleware",
@@ -59,6 +59,12 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # JWTAuthMiddleware must run AFTER AuthenticationMiddleware — Django's
+    # built-in middleware unconditionally overwrites request.user with its
+    # session-resolved (Anonymous) user, which would clobber the JWT-resolved
+    # user if we ran before it.
+    "find_device.middleware.JWTAuthMiddleware",
+    "find_device.middleware.APIKeyMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -259,7 +265,9 @@ SIMPLE_JWT = {
 }
 
 # ── Authentication ────────────────────────────────────────────────────────────
-# Set to True to require JWT on all /plc/ endpoints.
-# Leave False during development / migration to keep existing integrations working.
+# Every /plc/ endpoint controls real building hardware (lighting, security
+# arm/disarm, lockdown) and must require a signed-in user so each action can
+# be attributed to a person. Set PLC_REQUIRE_AUTH=False only for isolated
+# local tooling that intentionally bypasses login (e.g. a curl smoke test).
 
-PLC_REQUIRE_AUTH = os.getenv("PLC_REQUIRE_AUTH", "False").lower() == "true"
+PLC_REQUIRE_AUTH = os.getenv("PLC_REQUIRE_AUTH", "True").lower() == "true"

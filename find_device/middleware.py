@@ -5,6 +5,7 @@ Provides:
   - RequestLoggingMiddleware  — structured request/response logging
   - RateLimitMiddleware       — per-IP sliding-window rate limit
   - APIKeyMiddleware          — optional bearer/header auth (set API_KEY env var)
+  - JWTAuthMiddleware         — per-user JWT auth on /plc/* (set PLC_REQUIRE_AUTH)
 """
 from __future__ import annotations
 
@@ -41,10 +42,12 @@ class RequestLoggingMiddleware:
         response = self.get_response(request)
         ms = round((time.perf_counter() - t0) * 1000)
 
-        ip = _get_client_ip(request)
+        ip   = _get_client_ip(request)
+        user = getattr(request, "user", None)
+        username = user.username if user is not None and getattr(user, "is_authenticated", False) else "-"
         logger.info(
-            "%s %s %d %dms  ip=%s",
-            request.method, request.path, response.status_code, ms, ip,
+            "%s %s %d %dms  ip=%s  user=%s",
+            request.method, request.path, response.status_code, ms, ip, username,
         )
         return response
 
@@ -158,6 +161,61 @@ class APIKeyMiddleware:
                 status=401,
             )
 
+        return self.get_response(request)
+
+
+# ── Per-user JWT auth on /plc/* ───────────────────────────────────────────────
+
+class JWTAuthMiddleware:
+    """
+    Requires a valid JWT (same tokens issued by /auth/login/) on every /plc/*
+    request, and attaches the resolved user to request.user — so every
+    building-control action (dimmer/relay/security writes) can be attributed
+    to the person who made it, not just an IP address.
+
+    Controlled by settings.PLC_REQUIRE_AUTH. Health checks and the dev MOCK
+    PLC remain reachable without auth so local tooling (curl, bootstrap
+    scripts) keeps working when explicitly disabled.
+    """
+
+    PROTECTED_PREFIX = "/plc/"
+    SKIP_PATHS = ("/plc/", "/plc")  # bare health check (views.health) stays open
+
+    def __init__(self, get_response: Callable):
+        self.get_response = get_response
+        from rest_framework_simplejwt.authentication import JWTAuthentication
+        self._authenticator = JWTAuthentication()
+
+    def __call__(self, request: HttpRequest):
+        if not getattr(settings, "PLC_REQUIRE_AUTH", True):
+            return self.get_response(request)
+
+        if not request.path.startswith(self.PROTECTED_PREFIX):
+            return self.get_response(request)
+
+        # The health check (exact "/plc/" or "/plc") stays open so monitoring
+        # and the connection-test screen don't need a token just to ping.
+        if request.path.rstrip("/") == "/plc":
+            return self.get_response(request)
+
+        try:
+            result = self._authenticator.authenticate(request)
+        except Exception as exc:
+            logger.warning("JWT auth error  path=%s  err=%s", request.path, exc)
+            result = None
+
+        if result is None:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": "Authentication required. Sign in and retry.",
+                    "code": "UNAUTHORIZED",
+                },
+                status=401,
+            )
+
+        user, _token = result
+        request.user = user
         return self.get_response(request)
 
 

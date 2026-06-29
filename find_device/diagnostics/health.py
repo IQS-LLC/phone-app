@@ -165,26 +165,22 @@ class HealthMonitor:
     # ── Core poll ─────────────────────────────────────────────────────────────
 
     def _check_all(self) -> None:
-        """Import DeviceRegistry and probe every registered device."""
+        """Probe every apartment registry that's been used in this process."""
         try:
             from find_device.plc.registry import DeviceRegistry  # lazy import avoids circular deps
         except ImportError:
             logger.warning("HealthMonitor: could not import DeviceRegistry")
             return
 
-        try:
-            registry = DeviceRegistry.instance()
-        except Exception as exc:
-            logger.error("HealthMonitor: failed to get DeviceRegistry: %s", exc)
-            return
-
-        # The registry exposes its internal ADSClient; iterate over known
-        # device configurations to build per-netid snapshots.
-        client      = registry._client
-        ams_net_id  = client.netid
-        ip_address  = client.ip
-
-        self._check_device(client, ams_net_id, ip_address)
+        # Multi-tenant: there's no single "the" registry anymore. Only check
+        # apartments that have actually opened an ADS connection — with
+        # hundreds of apartments possible, this avoids connecting to every
+        # PLC in the database just to health-check it.
+        for registry in DeviceRegistry.active_instances():
+            client     = registry._client
+            ams_net_id = client.netid
+            ip_address = client.ip
+            self._check_device(client, ams_net_id, ip_address)
 
     def _check_device(self, client, ams_net_id: str, ip: str) -> None:
         """

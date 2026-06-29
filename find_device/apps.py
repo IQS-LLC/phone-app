@@ -1,5 +1,4 @@
 import logging
-import os
 
 from django.apps import AppConfig
 
@@ -10,14 +9,8 @@ class FindDeviceConfig(AppConfig):
     name = 'find_device'
 
     def ready(self):
-        try:
-            from .plc.registry import DeviceRegistry
-            apt_id = int(os.getenv('APARTMENT_ID', '16'))
-            DeviceRegistry.instance()
-            logger.info(
-                "FindDeviceConfig: DeviceRegistry ready for apartment %d", apt_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "DeviceRegistry startup failed (PLC may be offline): %s", exc,
-            )
+        # DeviceRegistry instances are created lazily, per apartment, on
+        # first request (see DeviceRegistry.for_apartment) — with hundreds
+        # of apartments possible, eagerly connecting to every PLC at Django
+        # startup doesn't scale and isn't attempted here.
+        logger.info("FindDeviceConfig: ready (PLC connections are lazy, per-apartment)")

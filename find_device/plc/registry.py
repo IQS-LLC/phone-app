@@ -1,25 +1,23 @@
 """
-DeviceRegistry — singleton that owns the ADSClient and all device objects.
+DeviceRegistry — singleton (per apartment) that owns the ADSClient and all
+device objects for one Beckhoff CX.
 
 Multi-apartment design
-──────────────────────
-All apartment-specific data lives in the APARTMENT_CONFIGS dict at the bottom
-of this file.  To add a new apartment:
+───────────────────────
+Apartment-specific data (rooms, DALI channels, relays, switches, ...) lives
+in the database now — see find_device.models.Apartment/Room/ApartmentDevice
+— not in a hardcoded dict in this file. Adding apartment #501 means adding
+rows through the installer workflow / Django admin, not editing source code.
 
-  1.  Add an entry to APARTMENT_CONFIGS keyed by the apartment ID (e.g. 17).
-  2.  Each entry is a plain dict with keys:
-        dali, relays, curtains, switches, door_sensors, window_sensors,
-        motion_sensors, appliances
-      Each value is a list of kwargs dicts matching the device constructors
-      in devices.py.
-  3.  If using multiple Django instances (one per apartment) just change
-      the APARTMENT_ID env var; the registry self-configures at startup.
-  4.  If running a single multi-tenant Django: instantiate DeviceRegistry
-      for each apartment ID (they each hold a separate ADSClient + connection).
+self.apartment_id is the Apartment model's primary key. One Django process
+can hold many simultaneous ADS connections: call DeviceRegistry.for_apartment
+(apartment_pk) to get (or lazily create) the registry for that apartment —
+this is what every /plc/* view does, resolving apartment_pk from the
+authenticated user's ApartmentMembership, never from client input.
 
-The registry reads the default PLCDevice from the DB (manage/devices/) so
-the ADS connection address can be changed without touching source code.
-PLC_MOCK=True in env always wins (safe for dev/CI).
+The registry reads the ADS connection address from that Apartment's own
+PLCDevice (a 1:1 relationship) so it can be changed without touching source
+code. PLC_MOCK=True in env always wins (safe for dev/CI).
 """
 from __future__ import annotations
 
@@ -38,139 +36,20 @@ from .devices import (
 logger = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  APARTMENT CONFIGS
-#  ─────────────────
-#  Add one entry per apartment.  Only the layout changes; Python driver code,
-#  GVL variable names, and array sizes are identical across all apartments.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-APARTMENT_CONFIGS: dict[int, dict] = {
-
-    # ── Apartment 16 ────────────────────────────────────────────────────────
-    16: dict(
-        dali=[
-            # channel, name, room
-            dict(channel=1,  name='Light 1',  room='Living Room'),
-            dict(channel=2,  name='Light 2',  room='Living Room'),
-            dict(channel=3,  name='Light 3',  room='Living Room'),
-            dict(channel=4,  name='Light 4',  room='Living Room'),
-            dict(channel=5,  name='Light 5',  room='Dining Room'),
-            dict(channel=6,  name='Light 6',  room='Dining Room'),
-            dict(channel=7,  name='Light 7',  room='Dining Room'),
-            dict(channel=8,  name='Light 8',  room='Dining Room'),
-            dict(channel=9,  name='Light 9',  room='Bedroom 1'),
-            dict(channel=10, name='Light 10', room='Bedroom 1'),
-            dict(channel=11, name='Light 11', room='Bedroom 2'),
-            dict(channel=12, name='Light 12', room='Bedroom 2'),
-            dict(channel=13, name='Light 13', room='Kitchen'),
-            dict(channel=14, name='Light 14', room='Kitchen'),
-            dict(channel=15, name='Light 15', room='Hallway'),
-            dict(channel=16, name='Light 16', room='Hallway'),
-        ],
-        relays=[
-            # channel, name, room
-            dict(channel=1, name='Wall Light 1', room='Living Room'),
-            dict(channel=2, name='Wall Light 2', room='Living Room'),
-            dict(channel=3, name='Wall Light 3', room='Hallway'),
-            dict(channel=4, name='Wall Light 4', room='Hallway'),
-            dict(channel=5, name='Wall Light 5', room='Kitchen'),
-        ],
-        curtains=[
-            # index, name, room
-            dict(index=1, name='Curtain 1', room='Living Room'),
-            dict(index=2, name='Curtain 2', room='Living Room'),
-            dict(index=3, name='Curtain 3', room='Dining Room'),
-            dict(index=4, name='Curtain 4', room='Dining Room'),
-            dict(index=5, name='Curtain 5', room='Bedroom 1'),
-            dict(index=6, name='Curtain 6', room='Bedroom 2'),
-            dict(index=7, name='Curtain 7', room='Kitchen'),
-            dict(index=8, name='Curtain 8', room='Hallway'),
-        ],
-        switches=[
-            # index, name, room  — physical BTicino buttons
-            dict(index=1,  name='Living Room Main',  room='Living Room'),
-            dict(index=2,  name='Dining Room Main',  room='Dining Room'),
-            dict(index=3,  name='Bedroom 1 Main',    room='Bedroom 1'),
-            dict(index=4,  name='Bedroom 2 Main',    room='Bedroom 2'),
-            dict(index=5,  name='Kitchen Main',      room='Kitchen'),
-            dict(index=6,  name='Hallway Main',      room='Hallway'),
-            dict(index=7,  name='Wall Light 1 SW',   room='Living Room'),
-            dict(index=8,  name='Wall Light 2 SW',   room='Living Room'),
-            dict(index=9,  name='Wall Light 3 SW',   room='Hallway'),
-            dict(index=10, name='Wall Light 4 SW',   room='Hallway'),
-            dict(index=11, name='Wall Light 5 SW',   room='Kitchen'),
-            dict(index=12, name='Curtain 1 Up',      room='Living Room'),
-            dict(index=13, name='Curtain 1 Down',    room='Living Room'),
-            dict(index=14, name='Curtain 2 Up',      room='Living Room'),
-            dict(index=15, name='Curtain 2 Down',    room='Living Room'),
-            dict(index=16, name='Curtain 3 Up',      room='Dining Room'),
-            dict(index=17, name='Curtain 3 Down',    room='Dining Room'),
-            dict(index=18, name='Curtain 4 Up',      room='Dining Room'),
-            dict(index=19, name='Curtain 4 Down',    room='Dining Room'),
-            dict(index=20, name='Curtain 5 Up',      room='Bedroom 1'),
-            dict(index=21, name='Curtain 5 Down',    room='Bedroom 1'),
-            dict(index=22, name='Curtain 6 Up',      room='Bedroom 2'),
-            dict(index=23, name='Curtain 6 Down',    room='Bedroom 2'),
-            dict(index=24, name='Curtain 7 Up',      room='Kitchen'),
-            dict(index=25, name='Curtain 7 Down',    room='Kitchen'),
-            dict(index=26, name='Curtain 8 Up',      room='Hallway'),
-            dict(index=27, name='Curtain 8 Down',    room='Hallway'),
-        ],
-        door_sensors=[
-            # index, name, room
-            dict(index=1, name='Front Door',    room='Entrance'),
-            dict(index=2, name='Back Door',     room='Entrance'),
-            dict(index=3, name='Balcony Door',  room='Living Room'),
-        ],
-        window_sensors=[
-            dict(index=1, name='Living Room Window 1', room='Living Room'),
-            dict(index=2, name='Living Room Window 2', room='Living Room'),
-            dict(index=3, name='Bedroom 1 Window',     room='Bedroom 1'),
-            dict(index=4, name='Bedroom 2 Window',     room='Bedroom 2'),
-            dict(index=5, name='Kitchen Window',       room='Kitchen'),
-        ],
-        motion_sensors=[
-            dict(index=1, name='Motion Living Room', room='Living Room'),
-            dict(index=2, name='Motion Hallway',     room='Hallway'),
-            dict(index=3, name='Motion Bedroom 1',   room='Bedroom 1'),
-            dict(index=4, name='Motion Dining Room', room='Dining Room'),
-        ],
-        appliances=[
-            # gvl_name, display_name, room
-            dict(gvl_name='Fridge',        display_name='Fridge',         room='Kitchen'),
-            dict(gvl_name='CoffeeMachine', display_name='Coffee Machine', room='Kitchen'),
-            dict(gvl_name='Microwave',     display_name='Microwave',      room='Kitchen'),
-        ],
-    ),
-
-    # ── Template for future apartments ──────────────────────────────────────
-    # Copy the block above, increment key, adjust names/counts.
-    # The Python driver, GVL variable names and array sizes stay identical.
-}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  DeviceRegistry
-# ═══════════════════════════════════════════════════════════════════════════════
-
 class DeviceRegistry:
     """
     Central registry for all PLC devices in one apartment.
 
-    Thread-safe singleton per process.  For multi-apartment in a single
-    process, call DeviceRegistry.for_apartment(apt_id) to get apartment-
-    scoped instances instead of using the global singleton.
+    One instance per apartment, cached in _apt_instances. Use
+    DeviceRegistry.for_apartment(apartment_pk) to get the registry for a
+    specific apartment — this is the only entry point views.py should use.
     """
-
-    _instance:      Optional['DeviceRegistry'] = None
-    _instance_lock  = threading.Lock()
 
     # Per-apartment instances (for multi-tenant use)
     _apt_instances: Dict[int, 'DeviceRegistry'] = {}
     _apt_lock       = threading.Lock()
 
-    def __init__(self, apartment_id: int = 16):
+    def __init__(self, apartment_id: int):
         self.apartment_id = apartment_id
         mock = os.getenv('PLC_MOCK', 'True').lower() == 'true'
         self._client = ADSClient(
@@ -196,60 +75,73 @@ class DeviceRegistry:
         if self._started:
             return
 
-        # Override ADS connection from DB if a default PLCDevice is configured.
+        from django.apps import apps
+        Apartment       = apps.get_model('find_device', 'Apartment')
+        ApartmentDevice = apps.get_model('find_device', 'ApartmentDevice')
+
+        apartment = Apartment.objects.filter(pk=self.apartment_id).first()
+        if apartment is None:
+            logger.warning(
+                "DeviceRegistry[apt%s]: no Apartment row with this ID — "
+                "registry will start with zero devices.", self.apartment_id,
+            )
+
+        # ADS connection target comes from this apartment's own PLCDevice —
+        # never a global "is_default" lookup across every user's devices.
         # PLC_MOCK=True in env always wins (safe for dev/CI).
-        if not self._client.mock:
-            try:
-                from django.apps import apps
-                PLCDevice = apps.get_model('find_device', 'PLCDevice')
-                device = PLCDevice.objects.filter(
-                    is_default=True, is_active=True,
-                ).first()
-                if device:
-                    self._client.netid = device.ams_net_id
-                    self._client.ip    = device.ip_address
-                    logger.info(
-                        "DeviceRegistry[apt%d]: using PLCDevice '%s' (%s @ %s)",
-                        self.apartment_id, device.name,
-                        device.ams_net_id, device.ip_address,
-                    )
-            except Exception as exc:
-                logger.debug(
-                    "DeviceRegistry[apt%d]: no PLCDevice in DB, using env vars: %s",
-                    self.apartment_id, exc,
+        if not self._client.mock and apartment is not None:
+            device = getattr(apartment, 'plc_device', None)
+            if device is not None and device.is_active:
+                self._client.netid = device.ams_net_id
+                self._client.ip    = device.ip_address
+                logger.info(
+                    "DeviceRegistry[apt%s]: using PLCDevice '%s' (%s @ %s)",
+                    self.apartment_id, device.name,
+                    device.ams_net_id, device.ip_address,
+                )
+            else:
+                logger.warning(
+                    "DeviceRegistry[apt%s]: no PLCDevice registered for "
+                    "this apartment yet — install it via the installer "
+                    "workflow before going off mock.", self.apartment_id,
                 )
 
         ok = self._client.connect()
         if not ok and not self._client.mock:
             logger.warning(
-                "DeviceRegistry[apt%d]: PLC unreachable — falling back to mock",
+                "DeviceRegistry[apt%s]: PLC unreachable — falling back to mock",
                 self.apartment_id,
             )
             self._client.mock = True
             self._client.connect()
 
-        cfg = APARTMENT_CONFIGS.get(self.apartment_id, {})
-        for d in cfg.get('dali', []):
-            self.add_dali(**d)
-        for r in cfg.get('relays', []):
-            self.add_relay(**r)
-        for c in cfg.get('curtains', []):
-            self.add_curtain(**c)
-        for s in cfg.get('switches', []):
-            self.add_switch(**s)
-        for ds in cfg.get('door_sensors', []):
-            self.add_door_sensor(**ds)
-        for ws in cfg.get('window_sensors', []):
-            self.add_window_sensor(**ws)
-        for ms in cfg.get('motion_sensors', []):
-            self.add_motion_sensor(**ms)
-        for ap in cfg.get('appliances', []):
-            self.add_appliance(**ap)
-        self._security = SecurityController(self._client)
+        if apartment is not None:
+            for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
+                room_name = d.room.name if d.room else 'Unassigned'
+                if d.device_type == ApartmentDevice.TYPE_DALI:
+                    self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_RELAY:
+                    self.add_relay(channel=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_SWITCH:
+                    self.add_switch(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_CURTAIN:
+                    self.add_curtain(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_APPLIANCE:
+                    self.add_appliance(gvl_name=d.gvl_name, display_name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_DOOR_SENSOR:
+                    self.add_door_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_WINDOW_SENSOR:
+                    self.add_window_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_MOTION_SENSOR:
+                    self.add_motion_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+
+        # No security hardware exists in any apartment's I/O config yet
+        # (no gvlIO, no key-switch/alarm/lockdown terminals). Wire this up
+        # once a real ApartmentDevice/security row exists.
 
         self._started = True
         logger.info(
-            "DeviceRegistry[apt%d] ready: %d DALI, %d relays, %d curtains, "
+            "DeviceRegistry[apt%s] ready: %d DALI, %d relays, %d curtains, "
             "%d switches, %d door, %d window, %d motion, %d appliances  mock=%s",
             self.apartment_id,
             len(self._dali), len(self._relays), len(self._curtains),
@@ -330,26 +222,57 @@ class DeviceRegistry:
     @property
     def connected(self) -> bool: return self._client.is_connected
 
+    # ── Batched ADS read ──────────────────────────────────────────────────────
+    # Folds N per-device ADS round trips into a single read_list_by_name() sum
+    # read (pyads.Connection.read_list_by_name / ADSClient.read_batch). Falls
+    # back to per-device reads in mock mode, where there is no real ADS round
+    # trip to save.
+
+    def _batch_read_group(self, devices: dict) -> dict:
+        if not devices:
+            return {}
+
+        if self._client.mock:
+            result = {}
+            for key, dev in devices.items():
+                try:
+                    result[key] = (
+                        dev.read_actual_level() if hasattr(dev, 'read_actual_level')
+                        else dev.read_state()
+                    )
+                except Exception as exc:
+                    logger.error("mock read %s[%s]: %s", type(dev).__name__, key, exc)
+                    result[key] = None
+            return result
+
+        type_map = {dev.batch_var: dev.batch_plctype for dev in devices.values()}
+        raw = self._client.read_batch(type_map)
+        result = {}
+        for key, dev in devices.items():
+            if dev.batch_var in raw:
+                try:
+                    result[key] = dev.decode_batch(raw[dev.batch_var])
+                except Exception as exc:
+                    logger.error("decode %s: %s", dev.batch_var, exc)
+                    result[key] = None
+            else:
+                result[key] = None
+        if not raw:
+            logger.error(
+                "batch read failed for %d device(s) starting at %s",
+                len(devices), next(iter(type_map), '?'),
+            )
+        return result
+
     # ── Full state read (hot path — called every 2 s by Flutter poll) ─────────
 
     def read_full_state(self) -> dict:
-        dali_levels, relay_states, curtain_states = {}, {}, {}
+        dali_levels  = self._batch_read_group(self._dali)
+        relay_states = self._batch_read_group(self._relays)
+
+        curtain_states = {}
         switch_states, appliance_states = {}, {}
         door_states, window_states, motion_states = {}, {}, {}
-
-        for ch, dev in self._dali.items():
-            try:
-                dali_levels[ch] = dev.read_actual_level()
-            except Exception as exc:
-                logger.error("DALI ch%d read: %s", ch, exc)
-                dali_levels[ch] = None
-
-        for ch, dev in self._relays.items():
-            try:
-                relay_states[ch] = dev.read_state()
-            except Exception as exc:
-                logger.error("Relay ch%d read: %s", ch, exc)
-                relay_states[ch] = None
 
         for idx, dev in self._curtains.items():
             try:
@@ -414,24 +337,30 @@ class DeviceRegistry:
             'security':    security_state,
         }
 
-    # ── Singleton (default apartment = env var APARTMENT_ID, default 16) ──────
-
-    @classmethod
-    def instance(cls) -> 'DeviceRegistry':
-        with cls._instance_lock:
-            if cls._instance is None:
-                apt_id = int(os.getenv('APARTMENT_ID', '16'))
-                inst = cls(apartment_id=apt_id)
-                inst._start()
-                cls._instance = inst
-            return cls._instance
+    # ── Multi-tenant lookup ────────────────────────────────────────────────────
 
     @classmethod
     def for_apartment(cls, apt_id: int) -> 'DeviceRegistry':
-        """Return (or create) the registry for a specific apartment ID."""
+        """
+        Return (or lazily create) the registry for a specific apartment.
+
+        This is the only way to obtain a DeviceRegistry — apartment_id must
+        always come from the authenticated user's ApartmentMembership (see
+        views.py), never from client-supplied input, or one resident could
+        address another apartment's hardware.
+        """
         with cls._apt_lock:
             if apt_id not in cls._apt_instances:
                 inst = cls(apartment_id=apt_id)
                 inst._start()
                 cls._apt_instances[apt_id] = inst
             return cls._apt_instances[apt_id]
+
+    @classmethod
+    def active_instances(cls) -> List['DeviceRegistry']:
+        """All apartment registries that have been used at least once in
+        this process — i.e. have an open (or attempted) ADS connection.
+        Used by the health monitor instead of eagerly connecting to every
+        apartment in the database on a schedule."""
+        with cls._apt_lock:
+            return list(cls._apt_instances.values())

@@ -492,11 +492,11 @@ class ADSClient:
         Returns:
             ``{"name": str, "version": str, "major": int, "minor": int}``
 
-            In mock mode returns a synthetic Lumina Mock PLC descriptor.
+            In mock mode returns a synthetic Lugh Mock PLC descriptor.
         """
         if self.mock:
             return {
-                "name":    "Lumina Mock PLC",
+                "name":    "Lugh Mock PLC",
                 "version": "3.1.4.68",
                 "major":   3,
                 "minor":   1,
@@ -614,7 +614,7 @@ class ADSClient:
     # Route management
     # =========================================================================
 
-    def add_route(self, sender_net_id: str, route_name: str = "Lumina") -> bool:
+    def add_route(self, sender_net_id: str, route_name: str = "Lugh") -> bool:
         """
         Add an ADS route on the remote target that points back to this host.
 

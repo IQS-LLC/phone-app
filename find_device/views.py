@@ -44,6 +44,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .plc.registry import DeviceRegistry
 from .plc.devices import CurtainMotor
+from .permissions import log_action
 
 logger = logging.getLogger("lumina.api")
 
@@ -59,8 +60,81 @@ def _err(message: str, code: str = "SERVER_ERROR", status: int = 500) -> JsonRes
     return JsonResponse(
         {"ok": False, "error": message, "code": code, "ts": _ts()}, status=status)
 
-def _registry() -> DeviceRegistry:
-    return DeviceRegistry.instance()
+def _registry_or_error(request):
+    """
+    Resolve the DeviceRegistry for the apartment the AUTHENTICATED USER
+    belongs to — via a permanent ApartmentMembership, or, failing that, a
+    currently-active TemporaryAccess grant (cleaner, electrician, guest).
+
+    apartment_id is NEVER taken from request input — only resolved here
+    from the DB against request.user — so one resident can never address
+    another apartment's hardware by guessing or sending a different ID.
+    Returns (registry, None) on success, or (None, JsonResponse) the
+    caller should return as-is on failure.
+    """
+    from django.apps import apps
+    from django.utils import timezone
+    ApartmentMembership = apps.get_model('find_device', 'ApartmentMembership')
+    TemporaryAccess      = apps.get_model('find_device', 'TemporaryAccess')
+    Apartment            = apps.get_model('find_device', 'Apartment')
+
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        membership = (
+            ApartmentMembership.objects
+            .filter(user=user)
+            .order_by('-is_default')
+            .first()
+        )
+        if membership is not None:
+            return DeviceRegistry.for_apartment(membership.apartment_id), None
+
+        now = timezone.now()
+        grant = (
+            TemporaryAccess.objects
+            .filter(user=user, revoked=False, starts_at__lte=now, expires_at__gte=now)
+            .order_by('-starts_at')
+            .first()
+        )
+        if grant is not None:
+            return DeviceRegistry.for_apartment(grant.apartment_id), None
+
+        return None, _err(
+            "Your account isn't linked to any apartment yet.",
+            "NO_APARTMENT", 403,
+        )
+
+    # PLC_REQUIRE_AUTH=False — explicit local-tooling bypass. Fall back to
+    # the first apartment in the DB so dev/CI scripts keep working without
+    # a token.
+    apt = Apartment.objects.order_by('id').first()
+    if apt is None:
+        return None, _err("No apartment exists in the database yet.", "NOT_FOUND", 404)
+    return DeviceRegistry.for_apartment(apt.pk), None
+
+def _require_permission(request, registry, perm_code: str):
+    """
+    Verify the caller holds perm_code on registry.apartment_id. Never trust
+    the Flutter app to enforce this — every authorization decision happens
+    here, server-side. Returns None if allowed, or a JsonResponse to return
+    as-is if denied. No-ops when PLC_REQUIRE_AUTH=False (local tooling).
+    """
+    from .permissions import resolve_permissions
+
+    user = getattr(request, "user", None)
+    if user is None or not getattr(user, "is_authenticated", False):
+        return None
+
+    if perm_code not in resolve_permissions(user, registry.apartment_id):
+        log_action(
+            request, f"permission_denied:{perm_code}", result="failure",
+            path=request.path,
+        )
+        return _err(
+            f"You don't have '{perm_code}' permission for this apartment.",
+            "FORBIDDEN", 403,
+        )
+    return None
 
 def _parse_brightness(post_data):
     raw = post_data.get("brightness")
@@ -88,9 +162,9 @@ def _parse_bool_param(post_data, param: str):
 # ── Health ────────────────────────────────────────────────────────────────────
 
 def health(request):
+    r, _err_resp = _registry_or_error(request)
     try:
-        r = _registry()
-        plc_connected, mock = r.connected, r.mock
+        plc_connected, mock = (r.connected, r.mock) if r else (False, True)
     except Exception:
         plc_connected, mock = False, True
 
@@ -107,8 +181,11 @@ def health(request):
 
 @require_GET
 def get_state(request):
+    r, err = _registry_or_error(request)
+    if err:
+        return err
     try:
-        state = _registry().read_full_state()
+        state = r.read_full_state()
         return JsonResponse({**state, "ts": _ts()})
     except ConnectionError as exc:
         logger.error("get_state: PLC unreachable: %s", exc)
@@ -122,7 +199,9 @@ def get_state(request):
 
 @require_GET
 def get_devices(request):
-    r = _registry()
+    r, err = _registry_or_error(request)
+    if err:
+        return err
     return JsonResponse({
         "apartment_id":   r.apartment_id,
         "dali":           [d.to_dict() for d in r.all_dali()],
@@ -133,6 +212,7 @@ def get_devices(request):
         "door_sensors":   [s.to_dict() for s in r.all_door_sensors()],
         "window_sensors": [s.to_dict() for s in r.all_window_sensors()],
         "motion_sensors": [s.to_dict() for s in r.all_motion_sensors()],
+        "security_available": r.security() is not None,
         "rooms":          r.rooms(),
         "ts":             _ts(),
     })
@@ -142,8 +222,10 @@ def get_devices(request):
 
 @require_GET
 def get_diagnostics(request):
+    r, err = _registry_or_error(request)
+    if err:
+        return err
     try:
-        r     = _registry()
         state = r.read_full_state()
 
         return _ok({
@@ -189,20 +271,27 @@ def get_diagnostics(request):
 @csrf_exempt
 @require_POST
 def set_dali_brightness(request, channel: int):
-    if not 1 <= channel <= 16:
-        return _err(f"DALI channel must be 1-16, got {channel}", "INVALID_PARAM", 400)
+    if not 1 <= channel <= 28:
+        return _err(f"DALI channel must be 1-28, got {channel}", "INVALID_PARAM", 400)
 
     pct, err = _parse_brightness(request.POST)
     if err:
         return err
 
-    dev = _registry().dali(channel)
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.dali(channel)
     if dev is None:
         return _err(f"DALI channel {channel} not configured", "NOT_FOUND", 404)
 
     try:
         dev.set_brightness(pct)
         logger.info("DALI ch%d → %d%%", channel, pct)
+        log_action(request, "dali_brightness", channel=channel, brightness=pct)
         return _ok({"channel": channel, "brightness": pct})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
@@ -220,7 +309,13 @@ def set_dali_brightness_all(request):
     if err:
         return err
 
-    r, errors = _registry(), []
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    errors = []
     for dev in r.all_dali():
         try:
             dev.set_brightness(pct)
@@ -236,6 +331,7 @@ def set_dali_brightness_all(request):
         }, status=207)
 
     logger.info("set_all_brightness → %d%%", pct)
+    log_action(request, "dali_brightness_all", brightness=pct)
     return _ok({"brightness": pct, "channels": len(r.all_dali())})
 
 
@@ -252,7 +348,12 @@ def set_room_brightness(request, room_name: str):
     if err:
         return err
 
-    r       = _registry()
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
     devices = [d for d in r.all_dali() if d.room.lower() == room.lower()]
 
     if not devices:
@@ -277,6 +378,7 @@ def set_room_brightness(request, room_name: str):
         }, status=207)
 
     logger.info("set_room_brightness '%s' → %d%%", room, pct)
+    log_action(request, "dali_brightness_room", room=room, brightness=pct)
     return _ok({"room": room, "brightness": pct, "channels": len(devices)})
 
 
@@ -292,13 +394,20 @@ def set_relay(request, channel: int):
     if err:
         return err
 
-    dev = _registry().relay(channel)
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.relay(channel)
     if dev is None:
         return _err(f"Relay channel {channel} not configured", "NOT_FOUND", 404)
 
     try:
         dev.set_state(on)
         logger.info("Relay ch%d → %s", channel, "ON" if on else "OFF")
+        log_action(request, "relay", channel=channel, on=on)
         return _ok({"channel": channel, "on": on})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
@@ -330,13 +439,20 @@ def set_curtain(request, index: int):
             "cmd must be 'stop'/'up'/'down' (or 0/1/2)", "INVALID_PARAM", 400)
     cmd = _CURTAIN_CMD_MAP[raw]
 
-    dev = _registry().curtain(index)
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.curtain(index)
     if dev is None:
         return _err(f"Curtain {index} not configured", "NOT_FOUND", 404)
 
     try:
         dev.set_command(cmd)
         logger.info("Curtain %d → %s (%d)", index, raw, cmd)
+        log_action(request, "curtain", index=index, cmd=cmd)
         return _ok({"index": index, "cmd": cmd})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
@@ -353,7 +469,13 @@ def set_curtain_all(request):
         return _err("cmd must be 'stop'/'up'/'down'", "INVALID_PARAM", 400)
     cmd = _CURTAIN_CMD_MAP[raw]
 
-    r, errors = _registry(), []
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    errors = []
     for dev in r.all_curtains():
         try:
             dev.set_command(cmd)
@@ -368,6 +490,7 @@ def set_curtain_all(request):
         }, status=207)
 
     logger.info("set_curtain_all → %s (%d)", raw, cmd)
+    log_action(request, "curtain_all", cmd=cmd)
     return _ok({"cmd": cmd, "count": len(r.all_curtains())})
 
 
@@ -380,17 +503,23 @@ def set_appliance(request, gvl_name: str):
     if err:
         return err
 
-    dev = _registry().appliance(gvl_name)
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.appliance(gvl_name)
     if dev is None:
-        from .plc.devices import APPLIANCE_NAMES
         return _err(
             f"Appliance '{gvl_name}' not configured. "
-            f"Available: {list(_registry()._appliances.keys())}",
+            f"Available: {list(r._appliances.keys())}",
             "NOT_FOUND", 404)
 
     try:
         dev.set_state(on)
         logger.info("Appliance %s → %s", gvl_name, "ON" if on else "OFF")
+        log_action(request, "appliance", gvl_name=gvl_name, on=on)
         return _ok({"gvl_name": gvl_name, "on": on})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
@@ -404,8 +533,10 @@ def set_appliance(request, gvl_name: str):
 @require_GET
 def get_sensors(request):
     """Returns live states of all magnetic and motion sensors."""
+    r, err = _registry_or_error(request)
+    if err:
+        return err
     try:
-        r = _registry()
         return _ok({
             "door_sensors":   {idx: dev.read_state() for idx, dev in r._door_sensors.items()},
             "window_sensors": {idx: dev.read_state() for idx, dev in r._window_sensors.items()},
@@ -425,13 +556,20 @@ def set_alarm(request):
     if err:
         return err
 
-    sec = _registry().security()
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "emergency_controls")
+    if err:
+        return err
+    sec = r.security()
     if sec is None:
-        return _err("Security controller not initialised", "SERVER_ERROR", 500)
+        return _err("No security hardware configured for this apartment", "NOT_FOUND", 404)
 
     try:
         sec.set_alarm_armed(armed)
         logger.info("Alarm → %s", "ARMED" if armed else "DISARMED")
+        log_action(request, "alarm", armed=armed)
         return _ok({"armed": armed})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
@@ -449,13 +587,20 @@ def set_lockdown(request):
     if err:
         return err
 
-    sec = _registry().security()
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "emergency_controls")
+    if err:
+        return err
+    sec = r.security()
     if sec is None:
-        return _err("Security controller not initialised", "SERVER_ERROR", 500)
+        return _err("No security hardware configured for this apartment", "NOT_FOUND", 404)
 
     try:
         sec.set_lockdown(active)
         logger.info("Lockdown → %s", "ACTIVE" if active else "INACTIVE")
+        log_action(request, "lockdown", active=active)
         return _ok({"lockdown": active})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)

@@ -33,7 +33,8 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import UserProfile
+from .models import ApartmentMembership, SessionInfo, UserProfile
+from .permissions import log_action
 
 logger = logging.getLogger("lumina.auth")
 
@@ -105,6 +106,37 @@ def _err(message: str, code: str = "ERROR", status_code: int = 400) -> Response:
     return Response({"ok": False, "error": message, "code": code}, status=status_code)
 
 
+def _client_ip(request) -> str | None:
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR")
+
+
+def _record_session(request, refresh: RefreshToken, user: User) -> None:
+    """
+    Attach device metadata to the OutstandingToken SimpleJWT already creates
+    for this refresh token, so "logged-in devices" has something to show.
+    The app sends X-Device-Name / X-Device-OS / X-App-Version headers if it
+    has them; falls back to User-Agent. Never raises — losing this metadata
+    must not break login.
+    """
+    try:
+        jti = refresh.payload.get("jti", "")
+        SessionInfo.objects.update_or_create(
+            jti=jti,
+            defaults=dict(
+                user=user,
+                device_name=request.headers.get("X-Device-Name", "")[:100],
+                os=request.headers.get("X-Device-OS", "")[:50] or request.headers.get("User-Agent", "")[:50],
+                app_version=request.headers.get("X-App-Version", "")[:20],
+                ip_address=_client_ip(request),
+            ),
+        )
+    except Exception:
+        logger.exception("_record_session failed for user %s", user.username)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Register
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,7 +180,9 @@ def register(request: Request) -> Response:
     )
 
     refresh = RefreshToken.for_user(user)
+    _record_session(request, refresh, user)
     logger.info("New user registered: %s", username)
+    log_action(request, "register", user=user)
 
     return _ok(
         {
@@ -171,6 +205,7 @@ def login(request: Request) -> Response:
     Authenticate with username + password.
     Returns access token (30 min) + refresh token (7 days, rotated).
     """
+    attempted_username = (request.data.get("username") or "").strip()
     serializer = LuminaTokenObtainSerializer(
         data=request.data, context={"request": request}
     )
@@ -179,6 +214,11 @@ def login(request: Request) -> Response:
     except TokenError as exc:
         return _err(str(exc), "TOKEN_ERROR", 401)
     except serializers.ValidationError:
+        logger.warning("Login failed: %s", attempted_username)
+        log_action(
+            request, "login", result="failure",
+            reason="invalid credentials", attempted_username=attempted_username,
+        )
         return _err(
             "Invalid credentials. Check username and password.",
             "INVALID_CREDENTIALS",
@@ -186,7 +226,10 @@ def login(request: Request) -> Response:
         )
 
     data = serializer.validated_data
+    user = User.objects.get(username=data["user"]["username"])
+    _record_session(request, RefreshToken(data["refresh"]), user)
     logger.info("Login: %s", data["user"]["username"])
+    log_action(request, "login", user=user)
     return _ok(data)
 
 
@@ -208,18 +251,18 @@ def refresh_token(request: Request) -> Response:
     try:
         token = RefreshToken(token_str)
         access = str(token.access_token)
+        user = User.objects.get(id=token.payload["user_id"])
         # rotate — blacklists old, generates new refresh
         token.blacklist()
-        new_refresh = str(RefreshToken.for_user(
-            User.objects.get(id=token.payload["user_id"])
-        ))
+        new_refresh = RefreshToken.for_user(user)
+        _record_session(request, new_refresh, user)
     except (TokenError, InvalidToken) as exc:
         return _err(str(exc), "TOKEN_INVALID", 401)
     except Exception as exc:
         logger.exception("refresh_token error")
         return _err(str(exc), "SERVER_ERROR", 500)
 
-    return _ok({"access": access, "refresh": new_refresh})
+    return _ok({"access": access, "refresh": str(new_refresh)})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -283,9 +326,141 @@ def logout(request: Request) -> Response:
         return _err("refresh token is required", "INVALID_PARAM")
 
     try:
-        RefreshToken(token_str).blacklist()
+        token = RefreshToken(token_str)
+        SessionInfo.objects.filter(jti=token.payload.get("jti", "")).update(revoked=True)
+        token.blacklist()
     except (TokenError, InvalidToken):
         pass  # already invalid/expired — treat as logged out
 
     logger.info("Logout: %s", request.user.username)
+    log_action(request, "logout")
     return _ok({"message": "Logged out successfully"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sessions — logged-in devices
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def session_list(request: Request) -> Response:
+    """List this user's logged-in devices (active, non-revoked sessions)."""
+    sessions = SessionInfo.objects.filter(user=request.user, revoked=False)
+    return _ok({"sessions": [
+        {
+            "id": s.pk,
+            "device_name": s.device_name or "Unknown device",
+            "os": s.os,
+            "app_version": s.app_version,
+            "ip_address": s.ip_address,
+            "created_at": s.created_at.isoformat(),
+            "last_seen_at": s.last_seen_at.isoformat(),
+        }
+        for s in sessions
+    ]})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def session_revoke(request: Request, pk: int) -> Response:
+    """
+    Log out one specific device. Blacklists its underlying OutstandingToken
+    so the refresh token can't be used again, not just a local flag flip.
+    """
+    from django.shortcuts import get_object_or_404
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+
+    session = get_object_or_404(SessionInfo, pk=pk, user=request.user)
+    session.revoked = True
+    session.save(update_fields=["revoked"])
+
+    outstanding = OutstandingToken.objects.filter(jti=session.jti).first()
+    if outstanding is not None:
+        BlacklistedToken.objects.get_or_create(token=outstanding)
+
+    log_action(request, "session_revoke", session_id=pk, device_name=session.device_name)
+    return _ok({"message": "Session revoked"})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def session_revoke_all(request: Request) -> Response:
+    """Log out every device except the one making this request, if identifiable."""
+    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+
+    sessions = SessionInfo.objects.filter(user=request.user, revoked=False)
+    count = 0
+    for session in sessions:
+        session.revoked = True
+        session.save(update_fields=["revoked"])
+        outstanding = OutstandingToken.objects.filter(jti=session.jti).first()
+        if outstanding is not None:
+            BlacklistedToken.objects.get_or_create(token=outstanding)
+        count += 1
+
+    log_action(request, "session_revoke_all", count=count)
+    return _ok({"message": f"Revoked {count} session(s)"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apartment selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def apartment_list(request: Request) -> Response:
+    """
+    Every apartment this user can access — via permanent membership or an
+    active temporary grant — with their role/permissions on each, so the
+    app can show an apartment selector (or skip straight in if there's
+    only one) without ever needing a PLC IP or AMS Net ID.
+    """
+    from django.utils import timezone
+    from .models import TemporaryAccess
+
+    apartments = []
+    for m in ApartmentMembership.objects.filter(user=request.user).select_related("apartment"):
+        apartments.append({
+            "id": m.apartment_id,
+            "name": m.apartment.name,
+            "building": m.apartment.building,
+            "floor": m.apartment.floor,
+            "role": m.custom_role.name if m.custom_role_id else m.role,
+            "permissions": sorted(m.permission_codes()),
+            "is_default": m.is_default,
+            "access_type": "membership",
+        })
+
+    now = timezone.now()
+    for g in TemporaryAccess.objects.filter(
+        user=request.user, revoked=False, starts_at__lte=now, expires_at__gte=now,
+    ).select_related("apartment", "role"):
+        apartments.append({
+            "id": g.apartment_id,
+            "name": g.apartment.name,
+            "building": g.apartment.building,
+            "floor": g.apartment.floor,
+            "role": g.role.name,
+            "permissions": sorted(g.permission_codes()),
+            "is_default": False,
+            "access_type": "temporary",
+            "expires_at": g.expires_at.isoformat(),
+        })
+
+    return _ok({"apartments": apartments})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def apartment_select(request: Request, pk: int) -> Response:
+    """Switch which apartment this user's app opens to by default."""
+    membership = ApartmentMembership.objects.filter(user=request.user, apartment_id=pk).first()
+    if membership is None:
+        return _err(
+            "You don't have a membership on that apartment (temporary "
+            "grants can't be set as default).", "NOT_FOUND", 404,
+        )
+    membership.is_default = True
+    membership.save()  # model.save() demotes any other default
+    log_action(request, "apartment_select", apartment=membership.apartment)
+    return _ok({"apartment_id": pk})

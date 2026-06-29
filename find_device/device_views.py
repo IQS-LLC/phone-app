@@ -17,6 +17,7 @@ import logging
 import socket
 import time
 
+from django.db.models import Q, QuerySet
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -26,14 +27,30 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework import status
 
-from .models import PLCDevice
+from .models import ApartmentMembership, PLCDevice
 
 logger = logging.getLogger("lumina.devices")
+
+_MANAGE_ROLES = (ApartmentMembership.ROLE_OWNER, ApartmentMembership.ROLE_INSTALLER)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _manageable_devices(user) -> QuerySet:
+    """
+    Devices this user may view/edit: PLC connection settings are an
+    owner/installer concern, not every resident's. A device with no
+    apartment link yet (legacy / not-yet-assigned) falls back to the
+    literal owner field.
+    """
+    apartment_ids = ApartmentMembership.objects.filter(
+        user=user, role__in=_MANAGE_ROLES,
+    ).values_list("apartment_id", flat=True)
+    return PLCDevice.objects.filter(
+        Q(apartment_id__in=apartment_ids) | Q(apartment__isnull=True, owner=user)
+    )
 
 def _device_dict(dev: PLCDevice) -> dict:
     return {
@@ -78,7 +95,7 @@ def _validate_ams_net_id(value: str) -> bool:
 @permission_classes([IsAuthenticated])
 def device_list(request: Request) -> Response:
     if request.method == "GET":
-        devices = PLCDevice.objects.filter(owner=request.user)
+        devices = _manageable_devices(request.user)
         return _ok({"devices": [_device_dict(d) for d in devices]})
 
     # POST — create
@@ -141,7 +158,7 @@ def _create_device(request: Request) -> Response:
 @api_view(["GET", "PATCH", "DELETE"])
 @permission_classes([IsAuthenticated])
 def device_detail(request: Request, pk: int) -> Response:
-    dev = get_object_or_404(PLCDevice, pk=pk, owner=request.user)
+    dev = get_object_or_404(_manageable_devices(request.user), pk=pk)
 
     if request.method == "GET":
         return _ok({"device": _device_dict(dev)})
@@ -191,7 +208,7 @@ def device_detail(request: Request, pk: int) -> Response:
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def device_set_default(request: Request, pk: int) -> Response:
-    dev = get_object_or_404(PLCDevice, pk=pk, owner=request.user)
+    dev = get_object_or_404(_manageable_devices(request.user), pk=pk)
     dev.is_default = True
     dev.save()  # model.save() demotes others
     return _ok({"device": _device_dict(dev)})
@@ -208,7 +225,7 @@ def device_test(request: Request, pk: int) -> Response:
     Quickly probe TCP port 48898 (ADS) and optionally ADS port on the device.
     Does NOT attempt a full ADS handshake — just checks network reachability.
     """
-    dev = get_object_or_404(PLCDevice, pk=pk, owner=request.user)
+    dev = get_object_or_404(_manageable_devices(request.user), pk=pk)
 
     results: list[dict] = []
 

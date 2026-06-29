@@ -10,6 +10,7 @@ Endpoints (under /discovery/, JWT required)
 from __future__ import annotations
 
 import logging
+import os
 
 from django.shortcuts import get_object_or_404
 
@@ -18,9 +19,11 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from ..models import PLCDevice, DiscoveryCache
+from ..models import ApartmentMembership, PLCDevice, DiscoveryCache
+from ..permissions import log_action
 from .scanner import SymbolScanner
 from .classifier import classify_batch
+from . import network_scanner
 
 logger = logging.getLogger("lumina.discovery")
 
@@ -35,6 +38,59 @@ def _ok(data: dict, status_code: int = 200) -> Response:
 
 def _err(message: str, code: str = "ERROR", status_code: int = 400) -> Response:
     return Response({"ok": False, "error": message, "code": code}, status=status_code)
+
+
+def _is_installer(user) -> bool:
+    """Network-wide PLC discovery is an installer operation, not scoped to
+    a single apartment — gate it on holding installer_functions ANYWHERE,
+    not on any one apartment's membership."""
+    for m in ApartmentMembership.objects.filter(user=user):
+        if "installer_functions" in m.permission_codes():
+            return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Network discovery — find Beckhoff CX controllers on the building LAN
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def network_scan(request: Request) -> Response:
+    """
+    Scan configured subnets (PLC_DISCOVERY_SUBNETS) for live Beckhoff ADS
+    targets, and cross-reference each against already-registered
+    PLCDevices so the installer can see what's new vs. already onboarded.
+    """
+    if not _is_installer(request.user):
+        return _err("Installer access required.", "FORBIDDEN", 403)
+
+    results = network_scanner.scan()
+    registered_by_ip = {
+        d.ip_address: d for d in PLCDevice.objects.select_related("apartment")
+    }
+
+    for r in results:
+        existing = registered_by_ip.get(r["ip"])
+        r["registration_status"] = "registered" if existing else "unregistered"
+        r["apartment_name"] = existing.apartment.name if existing and existing.apartment_id else None
+        r["registered_device_id"] = existing.pk if existing else None
+        # Simple 3-tier connection-quality bucket from TCP latency.
+        ms = r.get("latency_ms")
+        r["connection_quality"] = (
+            "unknown" if ms is None else
+            "excellent" if ms < 10 else
+            "good" if ms < 50 else
+            "poor"
+        )
+
+    log_action(request, "plc_network_scan", found=len(results),
+               subnets=network_scanner.configured_subnets())
+    return _ok({
+        "results": results,
+        "subnets_scanned": network_scanner.configured_subnets(),
+        "mock": os.getenv("PLC_MOCK", "True").lower() == "true",
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
