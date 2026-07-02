@@ -13,7 +13,8 @@ from django.test import TestCase
 from django.utils import timezone
 
 from find_device.models import (
-    Apartment, ApartmentMembership, PLCDevice, Role, TemporaryAccess,
+    Apartment, ApartmentDevice, ApartmentMembership, PLCDevice, Role, Room,
+    TemporaryAccess,
 )
 from find_device.plc.registry import DeviceRegistry
 
@@ -467,3 +468,503 @@ class NetworkDiscoveryTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["mock"])
         self.assertGreater(len(resp.json()["results"]), 0)
+
+
+class RegistrationLockdownTests(TestCase):
+    """
+    Accounts are provisioned by the building's IT team, never self-service.
+    /auth/register/ must reject anonymous and ordinary-user callers, and
+    only succeed for staff.
+    """
+
+    def test_anonymous_cannot_self_register(self):
+        resp = self.client.post(
+            "/auth/register/",
+            {"username": "newperson", "password": "SomeStrongPass123!"},
+        )
+        self.assertIn(resp.status_code, (401, 403))
+        self.assertFalse(User.objects.filter(username="newperson").exists())
+
+    def test_ordinary_logged_in_user_cannot_register_others(self):
+        User.objects.create_user(username="alice", password="pw12345")
+        token = self.client.post(
+            "/auth/login/", {"username": "alice", "password": "pw12345"},
+        ).json()["access"]
+        resp = self.client.post(
+            "/auth/register/",
+            {"username": "newperson2", "password": "SomeStrongPass123!"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_provision_an_account(self):
+        User.objects.create_user(username="itstaff", password="pw12345", is_staff=True)
+        token = self.client.post(
+            "/auth/login/", {"username": "itstaff", "password": "pw12345"},
+        ).json()["access"]
+        resp = self.client.post(
+            "/auth/register/",
+            {"username": "newperson3", "password": "SomeStrongPass123!"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(User.objects.filter(username="newperson3").exists())
+
+
+class UserManagementTests(TestCase):
+    """Tech Team user-management API — staff-only, residents locked out."""
+
+    def setUp(self):
+        self.staff = User.objects.create_user(username="techlead", password="pw12345", is_staff=True)
+        self.resident = User.objects.create_user(username="resident1", password="pw12345")
+        self.apartment = Apartment.objects.get(name="Apartment 16")
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+
+    def _token(self, username, password="pw12345"):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": password},
+        ).json()["access"]
+
+    def test_resident_cannot_list_users(self):
+        token = self._token("resident1")
+        resp = self.client.get("/manage/users/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_list_users_with_apartment_summary(self):
+        token = self._token("techlead")
+        resp = self.client.get("/manage/users/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 200)
+        by_username = {u["username"]: u for u in resp.json()["users"]}
+        self.assertIn("resident1", by_username)
+        self.assertEqual(by_username["resident1"]["apartments"][0]["name"], "Apartment 16")
+
+    def test_resident_cannot_list_all_apartments(self):
+        token = self._token("resident1")
+        resp = self.client.get("/manage/users/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_list_all_apartments(self):
+        token = self._token("techlead")
+        resp = self.client.get("/manage/users/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 200)
+        names = {a["name"] for a in resp.json()["apartments"]}
+        self.assertIn("Apartment 16", names)
+        self.assertIn("Apartment 8", names)
+
+    def test_staff_can_disable_and_reenable_a_user(self):
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/disable/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.resident.refresh_from_db()
+        self.assertFalse(self.resident.is_active)
+
+        # A disabled account can no longer log in.
+        login_resp = self.client.post(
+            "/auth/login/", {"username": "resident1", "password": "pw12345"})
+        self.assertEqual(login_resp.status_code, 401)
+
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/enable/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.resident.refresh_from_db()
+        self.assertTrue(self.resident.is_active)
+
+    def test_staff_cannot_disable_their_own_account(self):
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.staff.pk}/disable/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_staff_can_reset_a_users_password(self):
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/reset-password/",
+            {"new_password": "BrandNewPass456!"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Old password no longer works, new one does.
+        old_login = self.client.post(
+            "/auth/login/", {"username": "resident1", "password": "pw12345"})
+        self.assertEqual(old_login.status_code, 401)
+        new_login = self.client.post(
+            "/auth/login/", {"username": "resident1", "password": "BrandNewPass456!"})
+        self.assertEqual(new_login.status_code, 200)
+
+    def test_staff_can_force_logout_a_user(self):
+        # resident1 logs in on two "devices".
+        d1 = self.client.post(
+            "/auth/login/", {"username": "resident1", "password": "pw12345"}).json()
+        self.client.post(
+            "/auth/login/", {"username": "resident1", "password": "pw12345"})
+
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/force-logout/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # The old refresh token from before the force-logout no longer works.
+        refresh_resp = self.client.post("/auth/refresh/", {"refresh": d1["refresh"]})
+        self.assertEqual(refresh_resp.status_code, 401)
+
+    def test_staff_can_assign_a_second_apartment(self):
+        apt8 = Apartment.objects.get(name="Apartment 8")
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/assign-apartment/",
+            {"apartment_id": apt8.pk, "role": "owner"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 201)
+        apartments = {a["name"]: a for a in resp.json()["user"]["apartments"]}
+        self.assertEqual(set(apartments), {"Apartment 16", "Apartment 8"})
+        self.assertEqual(apartments["Apartment 8"]["role"], "owner")
+
+    def test_staff_can_delete_a_user(self):
+        token = self._token("techlead")
+        resp = self.client.delete(
+            f"/manage/users/{self.resident.pk}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(User.objects.filter(username="resident1").exists())
+
+    def test_staff_cannot_delete_their_own_account(self):
+        token = self._token("techlead")
+        resp = self.client.delete(
+            f"/manage/users/{self.staff.pk}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(User.objects.filter(username="techlead").exists())
+
+    def test_staff_can_view_a_users_sessions(self):
+        self.client.post("/auth/login/", {"username": "resident1", "password": "pw12345"})
+        token = self._token("techlead")
+        resp = self.client.get(
+            f"/manage/users/{self.resident.pk}/sessions/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["sessions"]), 1)
+
+    def test_resident_cannot_view_another_users_sessions(self):
+        token = self._token("resident1")
+        resp = self.client.get(
+            f"/manage/users/{self.staff.pk}/sessions/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_permission_list_is_staff_only(self):
+        resp = self.client.get(
+            "/manage/permissions/", HTTP_AUTHORIZATION=f"Bearer {self._token('resident1')}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+        resp = self.client.get(
+            "/manage/permissions/", HTTP_AUTHORIZATION=f"Bearer {self._token('techlead')}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        codes = {p["code"] for p in resp.json()["permissions"]}
+        self.assertIn("diagnostics", codes)
+        self.assertIn("view_cameras", codes)
+
+    def test_staff_can_grant_and_view_extra_permissions(self):
+        token = self._token("techlead")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/apartments/{self.apartment.pk}/permissions/",
+            {"permissions": ["diagnostics", "view_cameras"]},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["extra_permissions"], ["diagnostics", "view_cameras"])
+        self.assertIn("diagnostics", body["effective_permissions"])
+        # resident's normal role permissions (e.g. "view") are still present —
+        # extra_permissions is additive, not a replacement.
+        self.assertIn("view", body["effective_permissions"])
+
+        get_resp = self.client.get(
+            f"/manage/users/{self.resident.pk}/apartments/{self.apartment.pk}/permissions/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(get_resp.status_code, 200)
+        self.assertEqual(get_resp.json()["extra_permissions"], ["diagnostics", "view_cameras"])
+
+    def test_resident_cannot_grant_permissions(self):
+        token = self._token("resident1")
+        resp = self.client.post(
+            f"/manage/users/{self.resident.pk}/apartments/{self.apartment.pk}/permissions/",
+            {"permissions": ["diagnostics"]},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+class ApartmentManagementTests(TestCase):
+    """Tech Team apartment-overview API — staff-only, aggregated per-apartment view."""
+
+    def setUp(self):
+        self.staff = User.objects.create_user(username="techlead2", password="pw12345", is_staff=True)
+        self.owner = User.objects.create_user(username="owner1", password="pw12345")
+        self.resident = User.objects.create_user(username="resident2", password="pw12345")
+        self.apartment = Apartment.objects.get(name="Apartment 16")
+        ApartmentMembership.objects.create(
+            user=self.owner, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_OWNER, is_default=True,
+        )
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+
+    def _token(self, username, password="pw12345"):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": password},
+        ).json()["access"]
+
+    def test_resident_cannot_list_apartment_management_overview(self):
+        token = self._token("resident2")
+        resp = self.client.get("/manage/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_sees_owner_residents_and_device_counts(self):
+        token = self._token("techlead2")
+        resp = self.client.get("/manage/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 200)
+        by_name = {a["name"]: a for a in resp.json()["apartments"]}
+        apt16 = by_name["Apartment 16"]
+        self.assertEqual(apt16["owner"]["username"], "owner1")
+        self.assertEqual([r["username"] for r in apt16["residents"]], ["resident2"])
+        self.assertGreater(apt16["device_count"], 0)
+        self.assertGreater(apt16["room_count"], 0)
+
+    def test_staff_can_view_apartment_detail_with_room_breakdown(self):
+        token = self._token("techlead2")
+        resp = self.client.get(
+            f"/manage/apartments/{self.apartment.pk}/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        apartment = resp.json()["apartment"]
+        self.assertEqual(apartment["name"], "Apartment 16")
+        self.assertGreater(len(apartment["rooms"]), 0)
+        self.assertIn("device_count", apartment["rooms"][0])
+
+    def test_staff_can_create_a_new_apartment(self):
+        token = self._token("techlead2")
+        resp = self.client.post(
+            "/manage/apartments/", {"name": "Apartment 22", "building": "B", "floor": "2"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(Apartment.objects.filter(name="Apartment 22").exists())
+
+    def test_staff_cannot_create_duplicate_apartment_name(self):
+        token = self._token("techlead2")
+        resp = self.client.post(
+            "/manage/apartments/", {"name": "Apartment 16"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    def test_resident_cannot_create_apartment(self):
+        token = self._token("resident2")
+        resp = self.client.post(
+            "/manage/apartments/", {"name": "Apartment 99"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(Apartment.objects.filter(name="Apartment 99").exists())
+
+
+class ApartmentPlcAssignmentTests(TestCase):
+    """
+    PLC assignment endpoint — distinct from /manage/devices/, which never
+    links a created device to an Apartment. This is the only path that
+    actually makes a controller serve an apartment's dashboard.
+    """
+
+    def setUp(self):
+        self.staff = User.objects.create_user(username="techlead3", password="pw12345", is_staff=True)
+        self.resident = User.objects.create_user(username="resident3", password="pw12345")
+        self.apartment = Apartment.objects.get(name="Apartment 8")
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+
+    def _token(self, username, password="pw12345"):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": password},
+        ).json()["access"]
+
+    def test_resident_cannot_assign_plc(self):
+        token = self._token("resident3")
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/plc/",
+            {"ip_address": "192.168.0.50", "ams_net_id": "192.168.0.50.1.1"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_assign_and_view_plc(self):
+        token = self._token("techlead3")
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/plc/",
+            {"ip_address": "192.168.0.50", "ams_net_id": "192.168.0.50.1.1", "ads_port": 851},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["plc"]["ip_address"], "192.168.0.50")
+
+        # It's really linked to the apartment now, not floating unowned.
+        self.apartment.refresh_from_db()
+        self.assertIsNotNone(self.apartment.plc_device)
+        self.assertEqual(self.apartment.plc_device.ip_address, "192.168.0.50")
+
+        get_resp = self.client.get(
+            f"/manage/apartments/{self.apartment.pk}/plc/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(get_resp.status_code, 200)
+        self.assertEqual(get_resp.json()["plc"]["ams_net_id"], "192.168.0.50.1.1")
+
+    def test_invalid_ams_net_id_rejected(self):
+        token = self._token("techlead3")
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/plc/",
+            {"ip_address": "192.168.0.50", "ams_net_id": "not-an-ams-id"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_staff_can_reassign_then_unassign_plc(self):
+        token = self._token("techlead3")
+        self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/plc/",
+            {"ip_address": "192.168.0.50", "ams_net_id": "192.168.0.50.1.1"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        # Re-POST updates the existing PLCDevice rather than erroring.
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/plc/",
+            {"ip_address": "192.168.0.99", "ams_net_id": "192.168.0.99.1.1"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["plc"]["ip_address"], "192.168.0.99")
+
+        del_resp = self.client.delete(
+            f"/manage/apartments/{self.apartment.pk}/plc/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(del_resp.status_code, 200)
+        self.apartment.refresh_from_db()
+        self.assertIsNone(getattr(self.apartment, "plc_device", None))
+
+
+class RoomAndDeviceLayoutTests(TestCase):
+    """Tech Team room/device rename + reorder — staff-only layout control."""
+
+    def setUp(self):
+        self.staff = User.objects.create_user(username="techlead4", password="pw12345", is_staff=True)
+        self.resident = User.objects.create_user(username="resident4", password="pw12345")
+        self.apartment = Apartment.objects.get(name="Apartment 16")
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+
+    def _token(self, username, password="pw12345"):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": password},
+        ).json()["access"]
+
+    def test_resident_cannot_create_room(self):
+        token = self._token("resident4")
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/rooms/", {"name": "Office"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_create_rename_and_delete_a_room(self):
+        token = self._token("techlead4")
+        create_resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/rooms/", {"name": "Office"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        room_id = create_resp.json()["room"]["id"]
+
+        rename_resp = self.client.patch(
+            f"/manage/apartments/{self.apartment.pk}/rooms/{room_id}/",
+            {"name": "Home Office"}, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(rename_resp.status_code, 200)
+        self.assertEqual(rename_resp.json()["room"]["name"], "Home Office")
+
+        del_resp = self.client.delete(
+            f"/manage/apartments/{self.apartment.pk}/rooms/{room_id}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertFalse(Room.objects.filter(pk=room_id).exists())
+
+    def test_staff_can_reorder_rooms(self):
+        token = self._token("techlead4")
+        rooms = list(Room.objects.filter(apartment=self.apartment).order_by("sort_order"))
+        self.assertGreaterEqual(len(rooms), 2)
+        reversed_order = [r.pk for r in reversed(rooms)]
+
+        resp = self.client.post(
+            f"/manage/apartments/{self.apartment.pk}/rooms/reorder/",
+            {"order": reversed_order}, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        rooms[-1].refresh_from_db()
+        self.assertEqual(rooms[-1].sort_order, 0)
+
+    def test_staff_can_rename_and_move_a_device_between_rooms(self):
+        token = self._token("techlead4")
+        device = ApartmentDevice.objects.filter(apartment=self.apartment, device_type="dali").first()
+        self.assertIsNotNone(device)
+        other_room = Room.objects.filter(apartment=self.apartment).exclude(pk=device.room_id).first()
+        self.assertIsNotNone(other_room)
+
+        resp = self.client.patch(
+            f"/manage/apartments/{self.apartment.pk}/devices/{device.pk}/",
+            {"name": "Reading Lamp", "room_id": other_room.pk},
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()["device"]
+        self.assertEqual(body["name"], "Reading Lamp")
+        self.assertEqual(body["room_id"], other_room.pk)
+
+    def test_resident_cannot_rename_device(self):
+        token = self._token("resident4")
+        device = ApartmentDevice.objects.filter(apartment=self.apartment).first()
+        resp = self.client.patch(
+            f"/manage/apartments/{self.apartment.pk}/devices/{device.pk}/",
+            {"name": "Hacked"}, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)

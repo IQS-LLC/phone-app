@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, auth_views, device_views
+from . import views, auth_views, device_views, user_management_views
 from .discovery import views as discovery_views
 
 urlpatterns = [
@@ -66,4 +66,37 @@ discovery_urlpatterns = [
     path('<int:device_id>/scan/',    discovery_views.scan,          name='discovery-scan'),
     path('<int:device_id>/symbols/', discovery_views.symbols,       name='discovery-symbols'),
     path('<int:device_id>/widgets/', discovery_views.widget_layout, name='discovery-widgets'),
+]
+
+# Mounted at /manage/users/ in PLC_Project/urls.py — Tech Team only (IsAdminUser)
+user_management_urlpatterns = [
+    path('',                        user_management_views.user_list,             name='users-list'),
+    path('apartments/',             user_management_views.apartment_list_all,    name='users-apartments-all'),
+    path('<int:pk>/',                user_management_views.user_detail,           name='users-detail'),
+    path('<int:pk>/disable/',        user_management_views.user_disable,          name='users-disable'),
+    path('<int:pk>/enable/',         user_management_views.user_enable,           name='users-enable'),
+    path('<int:pk>/reset-password/', user_management_views.user_reset_password,   name='users-reset-password'),
+    path('<int:pk>/force-logout/',   user_management_views.user_force_logout,     name='users-force-logout'),
+    path('<int:pk>/assign-apartment/', user_management_views.user_assign_apartment, name='users-assign-apartment'),
+    path('<int:pk>/apartments/<int:apartment_id>/', user_management_views.user_remove_apartment, name='users-remove-apartment'),
+    path('<int:pk>/apartments/<int:apartment_id>/permissions/', user_management_views.user_apartment_permissions, name='users-apartment-permissions'),
+    path('<int:pk>/sessions/',       user_management_views.user_sessions,         name='users-sessions'),
+]
+
+# Mounted at /manage/permissions/ in PLC_Project/urls.py — Tech Team only
+permission_urlpatterns = [
+    path('', user_management_views.permission_list, name='permissions-list'),
+]
+
+# Mounted at /manage/apartments/ in PLC_Project/urls.py — Tech Team only
+apartment_management_urlpatterns = [
+    path('',          user_management_views.apartment_management_list,   name='apartments-mgmt-list'),
+    path('<int:pk>/', user_management_views.apartment_management_detail, name='apartments-mgmt-detail'),
+    path('<int:pk>/plc/',              user_management_views.apartment_plc,             name='apartments-mgmt-plc'),
+    path('<int:pk>/rooms/',            user_management_views.apartment_rooms,           name='apartments-mgmt-rooms'),
+    path('<int:pk>/rooms/reorder/',    user_management_views.apartment_rooms_reorder,   name='apartments-mgmt-rooms-reorder'),
+    path('<int:pk>/rooms/<int:room_id>/', user_management_views.apartment_room_detail,  name='apartments-mgmt-room-detail'),
+    path('<int:pk>/devices/',          user_management_views.apartment_devices,         name='apartments-mgmt-devices'),
+    path('<int:pk>/devices/reorder/',  user_management_views.apartment_devices_reorder, name='apartments-mgmt-devices-reorder'),
+    path('<int:pk>/devices/<int:device_id>/', user_management_views.apartment_device_detail, name='apartments-mgmt-device-detail'),
 ]

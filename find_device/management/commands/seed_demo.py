@@ -74,8 +74,12 @@ class Command(BaseCommand):
                 f"({custom_role_name or basic_role})"
             ))
 
-        # Building Administrator: membership on every apartment.
+        # Building Administrator doubles as the demo Tech Team account —
+        # is_staff is what gates the in-app User/Apartment Management
+        # console, independent of any ApartmentMembership role.
         admin = User.objects.get(username=ADMIN_USERNAME)
+        admin.is_staff = True
+        admin.save(update_fields=["is_staff"])
         for apartment in apartments.values():
             ApartmentMembership.objects.update_or_create(
                 user=admin, apartment=apartment,
@@ -127,7 +131,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.NOTICE("DEMO CREDENTIALS  (password for all: %s)" % DEMO_PASSWORD))
         self.stdout.write(self.style.NOTICE("=" * 72))
         rows = [
-            ("admin_diana",     "Building Administrator", "Every apartment, full access"),
+            ("admin_diana",     "Building Admin + Tech Team", "Every apartment + User/Apartment Management"),
             ("owner_oliver",    "Apartment Owner",         "Apartment 16, full access"),
             ("family_fiona",    "Family Member",           "Apartment 16, view + control"),
             ("guest_gary",      "Guest",                   "Apartment 16, view + control"),

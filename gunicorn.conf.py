@@ -1,10 +1,15 @@
-import multiprocessing
 import os
 
 bind = "0.0.0.0:8000"
 backlog = 2048
 
-workers = multiprocessing.cpu_count() * 2 + 1
+# DeviceRegistry (find_device/plc/registry.py) holds one in-memory ADS
+# connection per apartment, keyed in a process-local dict. Each gunicorn
+# worker is a separate process, so >1 worker means >1 independent ADS
+# connection per PLC and state that can disagree between workers. Until PLC
+# state is moved to a shared backend (Redis/Celery), this must stay at 1.
+# Override only if you understand that tradeoff.
+workers = int(os.getenv("GUNICORN_WORKERS", "1"))
 worker_class = "sync"
 worker_connections = 1000
 timeout = 30

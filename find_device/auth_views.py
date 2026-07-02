@@ -23,7 +23,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_default_exception_handler
@@ -91,6 +91,7 @@ def _user_dict(user: User) -> dict:
         "email":      user.email,
         "first_name": user.first_name,
         "last_name":  user.last_name,
+        "is_staff":   user.is_staff,  # Tech Team — gates the in-app admin section
         "theme":      profile.theme if profile else "dark",
         "push_notifications": (
             profile.push_notifications_enabled if profile else True
@@ -142,10 +143,13 @@ def _record_session(request, refresh: RefreshToken, user: User) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["POST"])
-@permission_classes([AllowAny])
+@permission_classes([IsAdminUser])
 def register(request: Request) -> Response:
     """
-    Create a new Lumina account.
+    Create a new account. Staff-only (admin/installer/IT team) — residents
+    are provisioned accounts by the building's IT team, never self-service.
+    Use Django admin for the common case; this endpoint exists for
+    programmatic provisioning by staff tooling.
 
     Body: username, password, email (optional), first_name (optional)
     Returns: access + refresh tokens + user dict

@@ -44,6 +44,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // ── Config ─────────────────────────────────────────────────────────────────
   String _baseUrl;
   final Future<String?> Function()? _getAuthToken;
+  final Future<String?> Function()? _refreshAuthToken;
   late ApiService _api;
   String get baseUrl => _baseUrl;
 
@@ -122,9 +123,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Constructor ────────────────────────────────────────────────────────────
 
-  AppState(this._baseUrl, {Future<String?> Function()? getAuthToken})
-      : _getAuthToken = getAuthToken {
-    _api = ApiService(_baseUrl, tokenProvider: _getAuthToken);
+  AppState(this._baseUrl, {
+    Future<String?> Function()? getAuthToken,
+    Future<String?> Function()? refreshAuthToken,
+  }) : _getAuthToken = getAuthToken, _refreshAuthToken = refreshAuthToken {
+    _api = ApiService(_baseUrl, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
     _addLog('Connecting to $_baseUrl');
     WidgetsBinding.instance.addObserver(this);
     _poll();
@@ -174,7 +177,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void setBaseUrl(String url) {
     if (url == _baseUrl) return;
     _baseUrl            = url;
-    _api                = ApiService(url, tokenProvider: _getAuthToken);
+    _api                = ApiService(url, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
     _connected          = false;
     _connecting         = true;
     _failStreak         = 0;

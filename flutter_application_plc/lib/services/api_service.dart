@@ -77,7 +77,27 @@ class ApiService {
   /// command can be attributed to a user.
   final Future<String?> Function()? tokenProvider;
 
-  ApiService(this.baseUrl, {this.tokenProvider});
+  /// Refreshes the access token (using the longer-lived refresh token) and
+  /// returns the new one, or null on failure. The access token lives only
+  /// 30 minutes — without this, a session left open past that point would
+  /// poll forever as "offline" against a perfectly healthy server, with no
+  /// way to recover short of a full logout/login.
+  final Future<String?> Function()? tokenRefresher;
+
+  ApiService(this.baseUrl, {this.tokenProvider, this.tokenRefresher});
+
+  ApiResult<Map<String, dynamic>> _parseResponse(http.Response response, int ms) {
+    if (response.statusCode == 200 || response.statusCode == 207) {
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      return ApiResult.ok(json, ms);
+    }
+    final errMsg = _extractErrorMessage(response.body, response.statusCode);
+    return ApiResult.err(
+      errMsg,
+      response.statusCode >= 500 ? ApiErrorCode.serverError : ApiErrorCode.clientError,
+      ms,
+    );
+  }
 
   Future<Map<String, String>> _authHeaders([Map<String, String>? extra]) async {
     final token = await tokenProvider?.call();
@@ -107,31 +127,29 @@ class ApiService {
     int retries   = retry ? _maxGetRetries : 0;
     Object? lastEx;
 
+    bool refreshedOnce = false;
+
     for (int attempt = 0; attempt <= retries; attempt++) {
       if (attempt > 0) {
         await Future<void>.delayed(_retryBaseDelay * attempt);
       }
       try {
-        final response = await http
+        var response = await http
             .get(Uri.parse('$baseUrl$path'), headers: await _authHeaders())
             .timeout(timeout);
-        sw.stop();
-        final ms = sw.elapsedMilliseconds;
 
-        if (response.statusCode == 200) {
-          final json = jsonDecode(response.body) as Map<String, dynamic>;
-          return ApiResult.ok(json, ms);
+        if (response.statusCode == 401 && !refreshedOnce && tokenRefresher != null) {
+          refreshedOnce = true;
+          final newToken = await tokenRefresher!.call();
+          if (newToken != null) {
+            response = await http
+                .get(Uri.parse('$baseUrl$path'), headers: await _authHeaders())
+                .timeout(timeout);
+          }
         }
 
-        // Parse structured error if present
-        final errMsg = _extractErrorMessage(response.body, response.statusCode);
-        return ApiResult.err(
-          errMsg,
-          response.statusCode >= 500
-              ? ApiErrorCode.serverError
-              : ApiErrorCode.clientError,
-          ms,
-        );
+        sw.stop();
+        return _parseResponse(response, sw.elapsedMilliseconds);
       } on SocketException catch (e) {
         lastEx = e;
       } on TimeoutException catch (e) {
@@ -147,7 +165,7 @@ class ApiService {
     return _exceptionToResult(lastEx, sw.elapsedMilliseconds);
   }
 
-  // ── POST (no retry — command semantics) ────────────────────────────────────
+  // ── POST (no retry — command semantics, except a single 401 refresh) ───────
 
   Future<ApiResult<Map<String, dynamic>>> _post(
     String path,
@@ -155,27 +173,25 @@ class ApiService {
   ) async {
     final sw = Stopwatch()..start();
     try {
-      final response = await http.post(
+      var response = await http.post(
         Uri.parse('$baseUrl$path'),
         headers: await _authHeaders({'Content-Type': 'application/x-www-form-urlencoded'}),
         body: body,
       ).timeout(_commandTimeout);
-      sw.stop();
-      final ms = sw.elapsedMilliseconds;
 
-      if (response.statusCode == 200 || response.statusCode == 207) {
-        final json = jsonDecode(response.body) as Map<String, dynamic>;
-        return ApiResult.ok(json, ms);
+      if (response.statusCode == 401 && tokenRefresher != null) {
+        final newToken = await tokenRefresher!.call();
+        if (newToken != null) {
+          response = await http.post(
+            Uri.parse('$baseUrl$path'),
+            headers: await _authHeaders({'Content-Type': 'application/x-www-form-urlencoded'}),
+            body: body,
+          ).timeout(_commandTimeout);
+        }
       }
 
-      final errMsg = _extractErrorMessage(response.body, response.statusCode);
-      return ApiResult.err(
-        errMsg,
-        response.statusCode >= 500
-            ? ApiErrorCode.serverError
-            : ApiErrorCode.clientError,
-        ms,
-      );
+      sw.stop();
+      return _parseResponse(response, sw.elapsedMilliseconds);
     } on SocketException catch (e) {
       sw.stop();
       return _exceptionToResult(e, sw.elapsedMilliseconds);

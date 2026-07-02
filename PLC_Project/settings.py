@@ -10,13 +10,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ── Security ──────────────────────────────────────────────────────────────────
 
+_INSECURE_DEFAULT_KEY = "django-insecure-change-me-in-production-use-env-var"
+
 # In production: set SECRET_KEY env var to a long random string.
-SECRET_KEY = os.getenv(
-    "SECRET_KEY",
-    "django-insecure-change-me-in-production-use-env-var",
-)
+SECRET_KEY = os.getenv("SECRET_KEY", _INSECURE_DEFAULT_KEY)
 
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
+
+if not DEBUG and SECRET_KEY == _INSECURE_DEFAULT_KEY:
+    raise RuntimeError(
+        "Refusing to start with DEBUG=False and no SECRET_KEY set. "
+        "Set the SECRET_KEY environment variable to a long random string "
+        "before deploying (e.g. `python -c \"import secrets; "
+        "print(secrets.token_urlsafe(50))\"`)."
+    )
 
 ALLOWED_HOSTS = [
     "localhost",
@@ -129,12 +136,16 @@ MEDIA_ROOT   = BASE_DIR / "media"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# For a local-network app we allow all origins.
-# In a public deployment restrict to specific origins via CORS_ALLOWED_ORIGINS.
+# Local/dev (DEBUG=True) allows all origins for convenience — the Flutter app
+# talks to whatever LAN IP the user configures. In production (DEBUG=False),
+# only the explicit origins in CORS_ALLOWED_ORIGINS are allowed.
 
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_METHODS     = ["GET", "POST", "OPTIONS"]
-CORS_ALLOW_HEADERS     = ["content-type", "x-api-key", "accept"]
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+
+CORS_ALLOW_ALL_ORIGINS = DEBUG and not _cors_origins
+CORS_ALLOWED_ORIGINS   = _cors_origins
+CORS_ALLOW_METHODS     = ["GET", "POST", "OPTIONS", "PATCH", "DELETE"]
+CORS_ALLOW_HEADERS     = ["content-type", "x-api-key", "accept", "authorization"]
 
 # ── Rate limiting (used by RateLimitMiddleware) ───────────────────────────────
 

@@ -1,15 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth/auth_service.dart';
 import 'auth/auth_state.dart';
 import 'config.dart';
 import 'state/app_state.dart';
 import 'theme.dart';
-import 'screens/dashboard_screen.dart';
 import 'screens/login_screen.dart';
-import 'screens/settings_screen.dart'; // exports kUrlPrefKey
+import 'screens/main_shell.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,12 +27,15 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  final prefs    = await SharedPreferences.getInstance();
-  final url      = prefs.getString(kUrlPrefKey) ?? AppConfig.serverUrl;
+  final url = await AppConfig.resolve();
 
   final authService = AuthService();
   final authState   = AuthState(authService);
-  final appState    = AppState(url, getAuthToken: authService.getAccessToken);
+  final appState    = AppState(
+    url,
+    getAuthToken:     authService.getAccessToken,
+    refreshAuthToken: authService.refreshAccessToken,
+  );
 
   runApp(LughApp(appState: appState, authState: authState));
 }
@@ -99,7 +100,7 @@ class _AuthGate extends StatelessWidget {
         // never from a PLCDevice's IP. The backend resolves which apartment
         // this user belongs to on every request; the app never needs to
         // know or care about a PLC's address.
-        return DashboardScreen(appState: appState, authState: authState);
+        return MainShell(appState: appState, authState: authState);
       },
     );
   }
@@ -109,35 +110,75 @@ class _AuthGate extends StatelessWidget {
 // Splash screen (shown during token check on startup)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _SplashScreen extends StatelessWidget {
+class _SplashScreen extends StatefulWidget {
   const _SplashScreen();
+  @override
+  State<_SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<_SplashScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double>   _fade;
+  late final Animation<double>   _slide;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800));
+    _fade  = CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+    _slide = Tween<double>(begin: 24, end: 0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic),
+    );
+    _ctrl.forward();
+  }
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: C.bg,
     body: Center(
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Container(
-          width: 64, height: 64,
-          decoration: BoxDecoration(
-            color:        C.accentLo,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: C.accent.withAlpha(60)),
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, _) => Opacity(
+          opacity: _fade.value,
+          child: Transform.translate(
+            offset: Offset(0, _slide.value),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Container(
+                width: 88, height: 88,
+                decoration: BoxDecoration(
+                  gradient: G.accent,
+                  borderRadius: BorderRadius.circular(26),
+                  boxShadow: S.accentGlow,
+                ),
+                child: const Icon(Icons.bolt_rounded, size: 48, color: Colors.black),
+              ),
+              const SizedBox(height: 28),
+              Text('Lugh', style: AppText.display),
+              const SizedBox(height: 6),
+              Text('by IQS', style: AppText.bodySm.copyWith(
+                  color: C.textSec, fontWeight: FontWeight.w600, letterSpacing: 2)),
+              const SizedBox(height: 6),
+              Text('Smart Building Control', style: AppText.caption),
+              const SizedBox(height: 40),
+              SizedBox(
+                width: 120,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    backgroundColor: C.border2,
+                    valueColor: const AlwaysStoppedAnimation<Color>(C.accent),
+                    minHeight: 2,
+                  ),
+                ),
+              ),
+            ]),
           ),
-          child: const Icon(Icons.bolt_rounded, size: 36, color: C.accent),
         ),
-        const SizedBox(height: 24),
-        Text('Lugh', style: AppText.h1),
-        const SizedBox(height: 4),
-        Text('by IQS', style: AppText.bodySm.copyWith(color: C.textSec)),
-        const SizedBox(height: 20),
-        const SizedBox(
-          width: 20, height: 20,
-          child: CircularProgressIndicator(
-            strokeWidth: 2, color: C.accent,
-          ),
-        ),
-      ]),
+      ),
     ),
   );
 }

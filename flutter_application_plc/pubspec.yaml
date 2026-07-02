@@ -1,5 +1,5 @@
 name: flutter_application_plc
-description: "Lumina — Professional DALI Lighting Control"
+description: "Lugh by IQS — Smart Building Control"
 publish_to: 'none'
 version: 2.0.0+1
 
@@ -20,6 +20,18 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/icon.png
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#F5C542"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+  remove_alpha_ios: true

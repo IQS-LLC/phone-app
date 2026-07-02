@@ -6,6 +6,9 @@ from find_device.urls import (
     auth_urlpatterns,
     device_urlpatterns,
     discovery_urlpatterns,
+    user_management_urlpatterns,
+    permission_urlpatterns,
+    apartment_management_urlpatterns,
 )
 
 
@@ -28,4 +31,9 @@ urlpatterns = [
 
     # ── TwinCAT discovery ─────────────────────────────────────────────────────
     path('manage/discovery/',  include(discovery_urlpatterns)),
+
+    # ── Tech Team user management ─────────────────────────────────────────────
+    path('manage/users/',      include(user_management_urlpatterns)),
+    path('manage/permissions/', include(permission_urlpatterns)),
+    path('manage/apartments/', include(apartment_management_urlpatterns)),
 ]

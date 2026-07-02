@@ -17,116 +17,157 @@ class LogScreen extends StatefulWidget {
 class _LogScreenState extends State<LogScreen> {
   bool _errorsOnly = false;
 
-  String _fmt(DateTime t) =>
+  String _rel(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inSeconds < 60) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24)   return '${diff.inHours}h ago';
+    return '${t.day}/${t.month}';
+  }
+
+  String _clock(DateTime t) =>
       '${t.hour.toString().padLeft(2, '0')}:'
       '${t.minute.toString().padLeft(2, '0')}:'
       '${t.second.toString().padLeft(2, '0')}';
 
+  Map<String, List<LogEntry>> _group(List<LogEntry> entries) {
+    final today = DateTime.now();
+    final dayStart = DateTime(today.year, today.month, today.day);
+    final result = <String, List<LogEntry>>{};
+    for (final e in entries) {
+      final key = e.time.isAfter(dayStart) ? 'Today' : 'Earlier';
+      result.putIfAbsent(key, () => []).add(e);
+    }
+    return result;
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: C.bg,
-    appBar: AppBar(
-      backgroundColor: C.surface,
-      title: const Text('Activity Log'),
-      iconTheme: const IconThemeData(color: C.textSec),
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Container(height: 1, color: C.border),
-      ),
-      actions: [
-        // Filter toggle
+    body: SafeArea(
+      child: Column(children: [
         Padding(
-          padding: const EdgeInsets.only(right: 4),
-          child: TapScale(
-            onTap: () => setState(() => _errorsOnly = !_errorsOnly),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              margin: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: _errorsOnly ? C.red.withAlpha(20) : C.surface,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: _errorsOnly ? C.red.withAlpha(70) : C.border,
-                ),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.error_outline_rounded,
-                    size: 13,
-                    color: _errorsOnly ? C.red : C.textSec),
-                const SizedBox(width: 4),
-                Text('Errors',
-                    style: GoogleFonts.inter(
-                      fontSize: 11,
-                      fontWeight: _errorsOnly
-                          ? FontWeight.w600 : FontWeight.w400,
-                      color: _errorsOnly ? C.red : C.textSec,
-                    )),
-              ]),
-            ),
-          ),
-        ),
-        // Clear button
-        ListenableBuilder(
-          listenable: widget.appState,
-          builder: (ctx, child) => widget.appState.log.isEmpty
-              ? const SizedBox.shrink()
-              : TapScale(
-                  onTap: () {
-                    HapticFeedback.lightImpact();
-                    _confirmClear(ctx);
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      const Icon(Icons.delete_outline_rounded,
-                          size: 15, color: C.red),
-                      const SizedBox(width: 4),
-                      Text('Clear',
-                          style: GoogleFonts.inter(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: C.red,
-                          )),
-                    ]),
+          padding: const EdgeInsets.fromLTRB(20, 16, 16, 0),
+          child: Row(children: [
+            Text('Activity', style: AppText.display.copyWith(fontSize: 26)),
+            const Spacer(),
+            TapScale(
+              onTap: () => setState(() => _errorsOnly = !_errorsOnly),
+              child: AnimatedContainer(
+                duration: Dur.fast,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color:        _errorsOnly ? C.red.withAlpha(18) : C.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: _errorsOnly ? C.red.withAlpha(60) : C.border, width: 0.5,
                   ),
                 ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.error_rounded, size: 13,
+                      color: _errorsOnly ? C.red : C.textTri),
+                  const SizedBox(width: 5),
+                  Text('Errors',
+                      style: GoogleFonts.inter(
+                        fontSize: 12,
+                        fontWeight: _errorsOnly ? FontWeight.w700 : FontWeight.w400,
+                        color: _errorsOnly ? C.red : C.textSec,
+                      )),
+                ]),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ListenableBuilder(
+              listenable: widget.appState,
+              builder: (_, _) => widget.appState.log.isEmpty
+                  ? const SizedBox.shrink()
+                  : TapScale(
+                      onTap: () {
+                        HapticFeedback.lightImpact();
+                        _confirmClear(context);
+                      },
+                      child: Container(
+                        width: 36, height: 36,
+                        decoration: BoxDecoration(
+                          color: C.red.withAlpha(14),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: C.red.withAlpha(40), width: 0.5),
+                        ),
+                        child: const Icon(Icons.delete_outline_rounded,
+                            color: C.red, size: 16),
+                      ),
+                    ),
+            ),
+          ]),
         ),
-      ],
-    ),
-    body: ListenableBuilder(
-      listenable: widget.appState,
-      builder: (ctx, child) {
-        final all      = widget.appState.log;
-        final filtered = _errorsOnly
-            ? all.where((e) => e.isError).toList()
-            : all;
+        const SizedBox(height: 16),
+        Expanded(
+          child: ListenableBuilder(
+            listenable: widget.appState,
+            builder: (_, _) {
+              final all = widget.appState.log;
+              final filtered = _errorsOnly
+                  ? all.where((e) => e.isError).toList()
+                  : all;
 
-        if (filtered.isEmpty) {
-          return EmptyState(
-            icon:     _errorsOnly
-                ? Icons.check_circle_outline_rounded
-                : Icons.receipt_long_outlined,
-            title:    _errorsOnly ? 'No errors — all clear' : 'No log entries yet',
-            subtitle: _errorsOnly
-                ? 'All commands completed successfully.'
-                : 'Commands and events will appear here.',
-          );
-        }
+              if (filtered.isEmpty) {
+                return EmptyState(
+                  icon: _errorsOnly
+                      ? Icons.check_circle_rounded
+                      : Icons.receipt_long_rounded,
+                  title:    _errorsOnly ? 'No errors' : 'No activity yet',
+                  subtitle: _errorsOnly
+                      ? 'All commands completed successfully.'
+                      : 'Commands and events will appear here.',
+                );
+              }
 
-        return ListView.builder(
-          physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
-          itemCount: filtered.length,
-          itemBuilder: (ctx, i) => _LogTile(
-            entry:    filtered[i],
-            fmt:      _fmt,
-            isFirst:  i == 0,
-            isLast:   i == filtered.length - 1,
+              final groups = _group(filtered);
+              final keys = ['Today', 'Earlier']
+                  .where((k) => groups.containsKey(k)).toList();
+
+              return CustomScrollView(
+                physics: const BouncingScrollPhysics(),
+                slivers: [
+                  for (final key in keys) ...[
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                      sliver: SliverToBoxAdapter(
+                        child: Text(key.toUpperCase(), style: AppText.label),
+                      ),
+                    ),
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                      sliver: SliverToBoxAdapter(
+                        child: AppCard(
+                          child: Column(
+                            children: List.generate(groups[key]!.length, (i) {
+                              final e = groups[key]![i];
+                              return Column(children: [
+                                if (i > 0) const Divider(
+                                  height: 0.5, thickness: 0.5,
+                                  color: C.border, indent: 46, endIndent: 16,
+                                ),
+                                _Tile(
+                                  entry:    e,
+                                  rel:      _rel(e.time),
+                                  clock:    _clock(e.time),
+                                  isLatest: key == 'Today' && i == 0,
+                                ),
+                              ]);
+                            }),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SliverPadding(padding: EdgeInsets.only(bottom: 16)),
+                ],
+              );
+            },
           ),
-        );
-      },
+        ),
+      ]),
     ),
   );
 
@@ -135,181 +176,76 @@ class _LogScreenState extends State<LogScreen> {
       context: ctx,
       backgroundColor: C.card,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (sheetCtx) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 36, height: 4,
-                margin: const EdgeInsets.only(bottom: 20),
-                decoration: BoxDecoration(
-                  color: C.border2,
-                  borderRadius: BorderRadius.circular(2),
-                ),
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const BottomSheetHandle(),
+            const SizedBox(height: 20),
+            Container(
+              width: 52, height: 52,
+              decoration: BoxDecoration(
+                color: C.red.withAlpha(16), shape: BoxShape.circle,
               ),
-              const Icon(Icons.delete_outline_rounded,
-                  color: C.red, size: 28),
-              const SizedBox(height: 12),
-              Text('Clear activity log?', style: AppText.h3),
-              const SizedBox(height: 6),
-              Text('This cannot be undone.',
-                  style: AppText.bodySm, textAlign: TextAlign.center),
-              const SizedBox(height: 24),
-              Row(children: [
-                Expanded(
-                  child: TapScale(
-                    onTap: () => Navigator.pop(sheetCtx),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      decoration: BoxDecoration(
-                        color: C.surface,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: C.border),
-                      ),
-                      child: Center(
-                        child: Text('Cancel',
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                              color: C.textSec,
-                            )),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TapScale(
-                    onTap: () {
-                      widget.appState.clearLog();
-                      Navigator.pop(sheetCtx);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      decoration: BoxDecoration(
-                        color: C.red.withAlpha(18),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: C.red.withAlpha(70)),
-                      ),
-                      child: Center(
-                        child: Text('Clear',
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: C.red,
-                            )),
-                      ),
-                    ),
-                  ),
-                ),
-              ]),
-            ],
-          ),
+              child: const Icon(Icons.delete_outline_rounded, color: C.red, size: 24),
+            ),
+            const SizedBox(height: 14),
+            Text('Clear activity log?', style: AppText.h3),
+            const SizedBox(height: 6),
+            Text('This cannot be undone.', style: AppText.bodySm),
+            const SizedBox(height: 24),
+            Row(children: [
+              Expanded(child: PrimaryButton(label: 'Cancel', color: C.textSec,
+                  onTap: () => Navigator.pop(sheetCtx))),
+              const SizedBox(width: 12),
+              Expanded(child: PrimaryButton(label: 'Clear', color: C.red,
+                  onTap: () { widget.appState.clearLog(); Navigator.pop(sheetCtx); })),
+            ]),
+          ]),
         ),
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Log tile
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _LogTile extends StatelessWidget {
-  final LogEntry               entry;
-  final String Function(DateTime) fmt;
-  final bool isFirst;
-  final bool isLast;
-
-  const _LogTile({
-    required this.entry,
-    required this.fmt,
-    required this.isFirst,
-    required this.isLast,
-  });
+class _Tile extends StatelessWidget {
+  final LogEntry entry;
+  final String   rel;
+  final String   clock;
+  final bool     isLatest;
+  const _Tile({required this.entry, required this.rel, required this.clock, required this.isLatest});
 
   @override
   Widget build(BuildContext context) {
     final color = entry.isError ? C.red : C.green;
-    final isNew = DateTime.now().difference(entry.time).inSeconds < 5;
-
-    return Container(
-      margin: EdgeInsets.only(
-        top:    isFirst ? 0 : 1,
-        bottom: isLast  ? 0 : 0,
-      ),
-      decoration: BoxDecoration(
-        color: isFirst && isNew
-            ? color.withAlpha(8)
-            : C.card,
-        borderRadius: BorderRadius.vertical(
-          top:    Radius.circular(isFirst ? 12 : 0),
-          bottom: Radius.circular(isLast  ? 12 : 0),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          width: 22, height: 22,
+          decoration: BoxDecoration(color: color.withAlpha(18), shape: BoxShape.circle),
+          child: Icon(entry.isError ? Icons.error_rounded : Icons.check_rounded,
+              color: color, size: 12),
         ),
-        border: Border(
-          left: BorderSide(color: C.border),
-          right: BorderSide(color: C.border),
-          top: BorderSide(
-            color: isFirst ? C.border : C.border.withAlpha(100)),
-          bottom: isLast
-              ? const BorderSide(color: C.border)
-              : BorderSide.none,
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(entry.message,
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: isLatest ? FontWeight.w600 : FontWeight.w400,
+                  color: entry.isError ? C.red : C.textPri,
+                  height: 1.4,
+                )),
+            const SizedBox(height: 3),
+            Text(clock, style: AppText.mono.copyWith(fontSize: 10, color: C.textTri)),
+          ]),
         ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Status dot
-            Padding(
-              padding: const EdgeInsets.only(top: 4, right: 12),
-              child: Container(
-                width: 7, height: 7,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: color,
-                  boxShadow: [
-                    BoxShadow(
-                      color:      color.withAlpha(60),
-                      blurRadius: 4,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // Message + time
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    entry.message,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: entry.isError ? C.red : C.textPri,
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    fmt(entry.time),
-                    style: GoogleFonts.jetBrainsMono(
-                      fontSize: 10,
-                      color: C.textTri,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+        const SizedBox(width: 8),
+        Text(rel, style: AppText.caption),
+      ]),
     );
   }
 }

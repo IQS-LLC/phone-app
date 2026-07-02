@@ -1,14 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../theme.dart';
+import '../config.dart';
 import '../state/app_state.dart';
 import '../auth/auth_state.dart';
 import '../widgets/common_widgets.dart';
 import 'connection_screen.dart';
 import 'dynamic_dashboard_screen.dart';
-
-const String kUrlPrefKey = 'server_url';
+import 'user_management_screen.dart';
+import 'apartment_management_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final AppState  appState;
@@ -20,340 +20,431 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  bool _loggingOut  = false;
+  bool _savingPush  = false;
+  bool _savingUrl   = false;
+  bool _testingConn = false;
   late final TextEditingController _urlCtrl;
-  final FocusNode _urlFocus = FocusNode();
-  bool _saving = false;
-  bool _urlDirty = false;
 
   @override
   void initState() {
     super.initState();
-    _urlCtrl = TextEditingController(text: widget.appState.baseUrl)
-      ..addListener(() {
-        final dirty = _urlCtrl.text.trim() != widget.appState.baseUrl;
-        if (dirty != _urlDirty) setState(() => _urlDirty = dirty);
-      });
+    _urlCtrl = TextEditingController(text: widget.appState.baseUrl);
   }
 
   @override
   void dispose() {
     _urlCtrl.dispose();
-    _urlFocus.dispose();
     super.dispose();
   }
 
-  Future<void> _save() async {
-    final url = _urlCtrl.text.trim();
-    if (url.isEmpty || !_urlDirty) return;
-    setState(() => _saving = true);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(kUrlPrefKey, url);
-    widget.appState.setBaseUrl(url);
-    if (mounted) {
-      setState(() { _saving = false; _urlDirty = false; });
-      Navigator.pop(context);
+  Future<void> _togglePush(bool v) async {
+    if (widget.authState == null) return;
+    setState(() => _savingPush = true);
+    final ok = await widget.authState!.updatePushNotifications(v);
+    if (!mounted) return;
+    setState(() => _savingPush = false);
+    if (!ok) AppToast.show(context, 'Could not update preference', error: true);
+  }
+
+  Future<void> _saveUrl() async {
+    final url = _urlCtrl.text.trim().replaceAll(RegExp(r'/+$'), '');
+    if (url.isEmpty) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      AppToast.show(context, 'Enter a valid URL, e.g. http://192.168.0.158:8000', error: true);
+      return;
     }
+    setState(() => _savingUrl = true);
+    widget.appState.setBaseUrl(url);
+    await widget.authState?.service.configure(url);
+    await AppConfig.persist(url);
+    await widget.appState.refresh();
+    if (!mounted) return;
+    setState(() => _savingUrl = false);
+    AppToast.show(context,
+        widget.appState.connected ? 'Connected to $url' : 'Saved — couldn\'t reach $url',
+        error: !widget.appState.connected);
+  }
+
+  Future<void> _testConn() async {
+    setState(() => _testingConn = true);
+    await widget.appState.refresh();
+    if (!mounted) return;
+    setState(() => _testingConn = false);
+    AppToast.show(context,
+        widget.appState.connected ? 'Connected' : 'Still unable to connect',
+        error: !widget.appState.connected);
+  }
+
+  Future<void> _confirmLogout() async {
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: C.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const BottomSheetHandle(),
+          const SizedBox(height: 20),
+          Container(
+            width: 52, height: 52,
+            decoration: BoxDecoration(
+              color: C.red.withAlpha(16), shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.logout_rounded, color: C.red, size: 24),
+          ),
+          const SizedBox(height: 16),
+          Text('Sign out?', style: AppText.h2),
+          const SizedBox(height: 8),
+          Text(
+            'You\'ll need to sign in again.\nThe PLC keeps running.',
+            style: AppText.bodySm, textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 28),
+          Row(children: [
+            Expanded(child: PrimaryButton(label: 'Cancel', color: C.textSec,
+                onTap: () => Navigator.pop(ctx, false))),
+            const SizedBox(width: 12),
+            Expanded(child: PrimaryButton(label: 'Sign Out', color: C.red,
+                onTap: () => Navigator.pop(ctx, true))),
+          ]),
+        ]),
+      ),
+    );
+    if (confirmed != true || widget.authState == null) return;
+    setState(() => _loggingOut = true);
+    await widget.authState!.logout();
   }
 
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: C.bg,
-    appBar: AppBar(
-      backgroundColor: C.surface,
-      title: const Text('Settings'),
-      iconTheme: const IconThemeData(color: C.textSec),
-      bottom: PreferredSize(
-        preferredSize: const Size.fromHeight(1),
-        child: Container(height: 1, color: C.border),
-      ),
-    ),
-    body: ListView(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 48),
-      children: [
-        _serverSection(),
-        const SizedBox(height: 24),
-        if (widget.authState != null) ...[
-          _deviceManagementSection(),
-          const SizedBox(height: 24),
-        ],
-        _statusSection(),
-        const SizedBox(height: 24),
-        _aboutSection(),
-      ],
-    ),
-  );
-
-  // ── Device management (controllers + auto-discovery) ─────────────────────
-
-  Widget _deviceManagementSection() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SectionHeader('Device Management'),
-      const SizedBox(height: 10),
-      AppCard(
-        child: Column(children: [
-          _NavRow(
-            icon:  Icons.cable_outlined,
-            color: C.blue,
-            label: 'Controllers',
-            subtitle: 'Manage Beckhoff CX devices (IP, AMS Net ID)',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ConnectionScreen(authState: widget.authState!),
-              ),
+    body: SafeArea(
+      child: CustomScrollView(
+        physics: const BouncingScrollPhysics(),
+        slivers: [
+          // ── App bar ──────────────────────────────────────────────────────
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+            sliver: SliverToBoxAdapter(
+              child: Text('Settings', style: AppText.display.copyWith(fontSize: 26)),
             ),
           ),
-          const AppDivider(),
-          _NavRow(
-            icon:  Icons.radar_rounded,
-            color: C.accent,
-            label: 'Auto-Discovery',
-            subtitle: 'Scan a controller and build a dynamic dashboard',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => DynamicDashboardScreen(authState: widget.authState!),
-              ),
-            ),
-          ),
-        ]),
-      ),
-    ],
-  );
-
-  // ── Server section ─────────────────────────────────────────────────────────
-
-  Widget _serverSection() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SectionHeader('Server'),
-      const SizedBox(height: 10),
-      AppCard(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(
-                width: 32, height: 32,
-                decoration: BoxDecoration(
-                  color: C.blue.withAlpha(18),
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: const Icon(Icons.dns_outlined, color: C.blue, size: 16),
-              ),
-              const SizedBox(width: 10),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Django Server URL', style: AppText.bodyMed),
-                  Text('Backend API endpoint',
-                      style: AppText.bodySm.copyWith(fontSize: 10)),
-                ],
-              ),
-            ]),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _urlCtrl,
-              focusNode:  _urlFocus,
-              style:       GoogleFonts.jetBrainsMono(
-                fontSize: 13, color: C.textPri,
-              ),
-              keyboardType: TextInputType.url,
-              autocorrect:  false,
-              onSubmitted:  (_) => _save(),
-              decoration: InputDecoration(
-                hintText: 'http://192.168.0.158:8000',
-                hintStyle: GoogleFonts.jetBrainsMono(
-                  fontSize: 13, color: C.textTri,
-                ),
-                filled:    true,
-                fillColor: C.surface,
-                contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 11),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: C.border),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: C.border),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: C.accent, width: 1.5),
-                ),
-                suffixIcon: _urlDirty
-                    ? IconButton(
-                        icon: const Icon(Icons.close_rounded,
-                            size: 16, color: C.textSec),
-                        onPressed: () {
-                          _urlCtrl.text = widget.appState.baseUrl;
-                          _urlFocus.unfocus();
-                        },
-                      )
-                    : null,
-              ),
-            ),
-            const SizedBox(height: 12),
-            AnimatedOpacity(
-              opacity: _urlDirty ? 1.0 : 0.4,
-              duration: const Duration(milliseconds: 200),
-              child: PrimaryButton(
-                label:   'Save & Reconnect',
-                icon:    Icons.sync_rounded,
-                onTap:   _save,
-                loading: _saving,
-              ),
-            ),
+          // ── Account ──────────────────────────────────────────────────────
+          if (widget.authState != null) ...[
+            _sectionPad(_accountSection()),
           ],
+          // ── Preferences ──────────────────────────────────────────────────
+          if (widget.authState != null)
+            _sectionPad(_preferencesSection()),
+          // ── Device Management (installer / Tech Team) ─────────────────
+          if (widget.authState?.hasInstallerAccess ?? false)
+            _sectionPad(_deviceManagementSection()),
+          // ── Tech Team ────────────────────────────────────────────────────
+          if (widget.authState?.user?.isStaff ?? false)
+            _sectionPad(_techTeamSection()),
+          // ── System Status ────────────────────────────────────────────────
+          _sectionPad(_statusSection()),
+          // ── About ────────────────────────────────────────────────────────
+          _sectionPad(_aboutSection()),
+          const SliverPadding(padding: EdgeInsets.only(bottom: 32)),
+        ],
+      ),
+    ),
+  );
+
+  SliverPadding _sectionPad(Widget child) => SliverPadding(
+    padding: const EdgeInsets.fromLTRB(16, 24, 16, 0),
+    sliver: SliverToBoxAdapter(child: child),
+  );
+
+  // ── Account ──────────────────────────────────────────────────────────────
+
+  Widget _accountSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('Account'),
+    const SizedBox(height: 12),
+    GlassCard(
+      padding: EdgeInsets.zero,
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(
+                gradient: G.accent,
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: S.accentGlow,
+              ),
+              child: Center(
+                child: Text(
+                  (widget.authState?.user?.displayName ?? 'U')[0].toUpperCase(),
+                  style: GoogleFonts.inter(
+                    fontSize: 18, fontWeight: FontWeight.w800, color: Colors.black,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(widget.authState?.user?.displayName ?? 'Signed in',
+                    style: AppText.cardTitle),
+                if (widget.authState?.user?.email.isNotEmpty == true)
+                  Text(widget.authState!.user!.email, style: AppText.caption),
+              ]),
+            ),
+            if (widget.authState?.user?.isStaff == true)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: C.purple.withAlpha(18),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: C.purple.withAlpha(50), width: 0.5),
+                ),
+                child: Text('TECH TEAM',
+                    style: AppText.labelSm.copyWith(color: C.purple)),
+              ),
+          ]),
+        ),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _SettingsRow(
+          icon: Icons.logout_rounded, label: 'Sign Out',
+          iconColor: C.red, labelColor: C.red,
+          loading: _loggingOut,
+          onTap: _loggingOut ? null : _confirmLogout,
+        ),
+      ]),
+    ),
+  ]);
+
+  // ── Preferences ──────────────────────────────────────────────────────────
+
+  Widget _preferencesSection() {
+    final pushEnabled = widget.authState?.user?.pushNotifications ?? true;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SectionHeader('Preferences'),
+      const SizedBox(height: 12),
+      AppCard(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: C.blue.withAlpha(18), borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.notifications_rounded, color: C.blue, size: 16),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text('Push Notifications', style: AppText.bodyMed)),
+            if (_savingPush)
+              const SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: C.accent))
+            else
+              Switch(value: pushEnabled, activeThumbColor: C.accent, onChanged: _togglePush),
+          ]),
         ),
       ),
-    ],
-  );
+    ]);
+  }
 
-  // ── Status section ─────────────────────────────────────────────────────────
+  // ── Device Management ────────────────────────────────────────────────────
 
-  Widget _statusSection() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SectionHeader('System Status'),
-      const SizedBox(height: 10),
-      ListenableBuilder(
-        listenable: widget.appState,
-        builder: (ctx, child) {
-          final s = widget.appState;
-          return AppCard(
-            child: Column(children: [
-              _InfoRow(
-                icon:  Icons.link_rounded,
-                label: 'Server',
-                value: s.baseUrl,
-                mono:  true,
+  Widget _deviceManagementSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('Device Management'),
+    const SizedBox(height: 12),
+    AppCard(
+      child: Column(children: [
+        _SettingsNavRow(
+          icon: Icons.cable_rounded, iconColor: C.blue,
+          label: 'Controllers', sub: 'Beckhoff CX devices — IP, AMS Net ID',
+          onTap: () => Navigator.push(context, MaterialPageRoute(
+            builder: (_) => ConnectionScreen(authState: widget.authState!),
+          )),
+        ),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _SettingsNavRow(
+          icon: Icons.radar_rounded, iconColor: C.accent,
+          label: 'Auto-Discovery', sub: 'Scan a controller and build a dynamic dashboard',
+          onTap: () => Navigator.push(context, MaterialPageRoute(
+            builder: (_) => DynamicDashboardScreen(authState: widget.authState!),
+          )),
+        ),
+      ]),
+    ),
+    const SizedBox(height: 12),
+    AppCard(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: C.teal.withAlpha(18), borderRadius: BorderRadius.circular(10),
               ),
-              const AppDivider(),
-              _InfoRow(
-                icon:       Icons.wifi_rounded,
-                label:      'Connection',
-                value:      s.connected ? 'Online' : 'Offline',
-                valueColor: s.connected ? C.green : C.red,
-                badge:      true,
-              ),
-              const AppDivider(),
-              _InfoRow(
-                icon:       Icons.memory_rounded,
-                label:      'PLC Mode',
-                value:      s.state.mock ? 'Mock PLC' : 'Real PLC',
-                valueColor: s.state.mock ? C.orange : C.green,
-                badge:      true,
-              ),
-              const AppDivider(),
-              _InfoRow(
-                icon:  Icons.lightbulb_outline_rounded,
-                label: 'DALI channels',
-                value: s.daliDevices.length.toString(),
-              ),
-              const AppDivider(),
-              _InfoRow(
-                icon:  Icons.toggle_on_outlined,
-                label: 'Wall relays',
-                value: s.relayDevices.length.toString(),
-              ),
-              const AppDivider(),
-              _InfoRow(
-                icon:  Icons.touch_app_outlined,
-                label: 'Input switches',
-                value: s.switchDevices.length.toString(),
-              ),
-            ]),
-          );
-        },
-      ),
-    ],
-  );
-
-  // ── About section ──────────────────────────────────────────────────────────
-
-  Widget _aboutSection() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      SectionHeader('About'),
-      const SizedBox(height: 10),
-      AppCard(
-        child: Column(children: [
-          _InfoRow(
-            icon:  Icons.bolt_rounded,
-            label: 'App',
-            value: 'Lugh — by IQS',
+              child: const Icon(Icons.dns_rounded, color: C.teal, size: 16),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text('Django Server URL', style: AppText.bodyMed)),
+          ]),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _urlCtrl,
+            style: AppText.mono.copyWith(fontSize: 12, color: C.textPri),
+            decoration: InputDecoration(
+              hintText: 'http://192.168.0.158:8000',
+              hintStyle: AppText.mono.copyWith(color: C.textTri),
+              filled: true, fillColor: C.elevated,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.border, width: 0.5)),
+              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.border, width: 0.5)),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.accent, width: 1.5)),
+            ),
           ),
-          const AppDivider(),
-          _InfoRow(
-            icon:  Icons.info_outline_rounded,
-            label: 'Version',
-            value: '2.0.0',
-          ),
-          const AppDivider(),
-          _InfoRow(
-            icon:  Icons.corporate_fare_rounded,
-            label: 'Protocol',
-            value: 'DALI / IEC 62386',
-          ),
-          const AppDivider(),
-          _InfoRow(
-            icon:  Icons.code_rounded,
-            label: 'Backend',
-            value: 'Django + PyADS',
-          ),
+          const SizedBox(height: 10),
+          PrimaryButton(label: 'Save & Reconnect', loading: _savingUrl, onTap: _saveUrl),
         ]),
       ),
-    ],
-  );
+    ),
+  ]);
+
+  // ── Tech Team ────────────────────────────────────────────────────────────
+
+  Widget _techTeamSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('Tech Team'),
+    const SizedBox(height: 12),
+    AppCard(
+      child: Column(children: [
+        _SettingsNavRow(
+          icon: Icons.admin_panel_settings_rounded, iconColor: C.purple,
+          label: 'User Management', sub: 'Create, disable, reset, or delete accounts',
+          onTap: () => Navigator.push(context, MaterialPageRoute(
+            builder: (_) => UserManagementScreen(authState: widget.authState!),
+          )),
+        ),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _SettingsNavRow(
+          icon: Icons.apartment_rounded, iconColor: C.blue,
+          label: 'Apartment Management', sub: 'Owners, residents, rooms, controller status',
+          onTap: () => Navigator.push(context, MaterialPageRoute(
+            builder: (_) => ApartmentManagementScreen(authState: widget.authState!),
+          )),
+        ),
+      ]),
+    ),
+  ]);
+
+  // ── System Status ────────────────────────────────────────────────────────
+
+  Widget _statusSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    Row(children: [
+      Expanded(child: SectionHeader('System Status')),
+      TapScale(
+        onTap: _testingConn ? null : _testConn,
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          if (_testingConn)
+            const SizedBox(width: 12, height: 12,
+                child: CircularProgressIndicator(strokeWidth: 1.5, color: C.accent))
+          else
+            const Icon(Icons.refresh_rounded, size: 13, color: C.accent),
+          const SizedBox(width: 5),
+          Text('Test Connection', style: AppText.bodySm.copyWith(
+              color: C.accent, fontWeight: FontWeight.w600, fontSize: 11)),
+        ]),
+      ),
+    ]),
+    const SizedBox(height: 12),
+    ListenableBuilder(
+      listenable: widget.appState,
+      builder: (_, _) {
+        final s = widget.appState;
+        return AppCard(
+          child: Column(children: [
+            _InfoRow(icon: Icons.link_rounded, label: 'Server', value: s.baseUrl, mono: true),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(
+              icon: Icons.wifi_rounded, label: 'Connection',
+              value: s.connected ? 'Online' : 'Offline',
+              valueColor: s.connected ? C.green : C.red, badge: true,
+            ),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(
+              icon: Icons.memory_rounded, label: 'PLC Mode',
+              value: s.state.mock ? 'Mock PLC' : 'Real PLC',
+              valueColor: s.state.mock ? C.orange : C.green, badge: true,
+            ),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(icon: Icons.lightbulb_outline_rounded, label: 'DALI channels', value: '${s.daliDevices.length}'),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(icon: Icons.toggle_on_outlined, label: 'Wall relays', value: '${s.relayDevices.length}'),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(icon: Icons.touch_app_outlined, label: 'Input switches', value: '${s.switchDevices.length}'),
+          ]),
+        );
+      },
+    ),
+  ]);
+
+  // ── About ────────────────────────────────────────────────────────────────
+
+  Widget _aboutSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('About'),
+    const SizedBox(height: 12),
+    AppCard(
+      child: Column(children: [
+        _InfoRow(icon: Icons.bolt_rounded, label: 'App', value: 'Lugh — by IQS'),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _InfoRow(icon: Icons.info_outline_rounded, label: 'Version', value: '2.0.0'),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _InfoRow(icon: Icons.corporate_fare_rounded, label: 'Protocol', value: 'DALI / IEC 62386'),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _InfoRow(icon: Icons.code_rounded, label: 'Backend', value: 'Django + PyADS'),
+      ]),
+    ),
+  ]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Navigation row
+// Shared row widgets
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _NavRow extends StatelessWidget {
+class _SettingsNavRow extends StatelessWidget {
   final IconData icon;
-  final Color    color;
+  final Color    iconColor;
   final String   label;
-  final String   subtitle;
+  final String   sub;
   final VoidCallback onTap;
-
-  const _NavRow({
-    required this.icon,
-    required this.color,
-    required this.label,
-    required this.subtitle,
-    required this.onTap,
-  });
+  const _SettingsNavRow({required this.icon, required this.iconColor,
+      required this.label, required this.sub, required this.onTap});
 
   @override
   Widget build(BuildContext context) => InkWell(
     onTap: onTap,
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
       child: Row(children: [
         Container(
           width: 32, height: 32,
           decoration: BoxDecoration(
-            color:        color.withAlpha(18),
-            borderRadius: BorderRadius.circular(9),
+            color: iconColor.withAlpha(18),
+            borderRadius: BorderRadius.circular(10),
           ),
-          child: Icon(icon, color: color, size: 16),
+          child: Icon(icon, color: iconColor, size: 16),
         ),
-        const SizedBox(width: 10),
+        const SizedBox(width: 12),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: AppText.bodyMed),
-              Text(subtitle, style: AppText.bodySm.copyWith(fontSize: 10)),
-            ],
-          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label, style: AppText.bodyMed),
+            Text(sub, style: AppText.caption),
+          ]),
         ),
         const Icon(Icons.chevron_right_rounded, color: C.textTri, size: 18),
       ]),
@@ -361,9 +452,31 @@ class _NavRow extends StatelessWidget {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Info row
-// ─────────────────────────────────────────────────────────────────────────────
+class _SettingsRow extends StatelessWidget {
+  final IconData icon;
+  final String   label;
+  final Color    iconColor;
+  final Color    labelColor;
+  final VoidCallback? onTap;
+  final bool loading;
+  const _SettingsRow({required this.icon, required this.label,
+      this.iconColor = C.textSec, this.labelColor = C.textPri,
+      this.onTap, this.loading = false});
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: loading ? null : onTap,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(children: [
+        Icon(icon, color: iconColor, size: 18),
+        const SizedBox(width: 12),
+        Text(loading ? '${label}ing…' : label,
+            style: AppText.bodyMed.copyWith(color: labelColor)),
+      ]),
+    ),
+  );
+}
 
 class _InfoRow extends StatelessWidget {
   final IconData icon;
@@ -372,19 +485,12 @@ class _InfoRow extends StatelessWidget {
   final Color?   valueColor;
   final bool     mono;
   final bool     badge;
-
-  const _InfoRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-    this.valueColor,
-    this.mono  = false,
-    this.badge = false,
-  });
+  const _InfoRow({required this.icon, required this.label, required this.value,
+      this.valueColor, this.mono = false, this.badge = false});
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
     child: Row(children: [
       Icon(icon, size: 15, color: C.textTri),
       const SizedBox(width: 10),
@@ -393,40 +499,29 @@ class _InfoRow extends StatelessWidget {
       badge
           ? _Badge(text: value, color: valueColor ?? C.textSec)
           : Flexible(
-              child: Text(
-                value,
-                textAlign: TextAlign.end,
-                overflow: TextOverflow.ellipsis,
-                style: mono
-                    ? GoogleFonts.jetBrainsMono(
-                        fontSize: 11, color: C.textSec)
-                    : GoogleFonts.inter(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: valueColor ?? C.textPri,
-                      ),
-              ),
+              child: Text(value, textAlign: TextAlign.end,
+                  overflow: TextOverflow.ellipsis,
+                  style: mono
+                      ? AppText.mono.copyWith(color: C.textSec)
+                      : GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: valueColor ?? C.textPri)),
             ),
     ]),
   );
 }
 
 class _Badge extends StatelessWidget {
-  final String text;
-  final Color  color;
+  final String text; final Color color;
   const _Badge({required this.text, required this.color});
 
   @override
   Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
     decoration: BoxDecoration(
-      color:        color.withAlpha(18),
-      borderRadius: BorderRadius.circular(6),
-      border: Border.all(color: color.withAlpha(55)),
+      color: color.withAlpha(18), borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: color.withAlpha(50), width: 0.5),
     ),
-    child: Text(text,
-        style: GoogleFonts.inter(
-          fontSize: 10, fontWeight: FontWeight.w700, color: color,
-        )),
+    child: Text(text, style: GoogleFonts.inter(
+      fontSize: 10, fontWeight: FontWeight.w700, color: color)),
   );
 }
