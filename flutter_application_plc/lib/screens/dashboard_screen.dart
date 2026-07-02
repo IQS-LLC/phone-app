@@ -1,24 +1,18 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../theme.dart';
+
+import '../auth/auth_state.dart';
 import '../models/models.dart';
 import '../state/app_state.dart';
-import '../auth/auth_state.dart';
+import '../theme.dart';
 import '../widgets/common_widgets.dart';
-import '../state/favorites_service.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dashboard Screen — the heart of the app
-// Design philosophy:
-//   • No uppercase section labels — visual grouping does the work
-//   • Every touch target ≥48px
-//   • Ambient glow on active rooms (warm, alive, inviting)
-//   • Scene cards large enough to feel like real choices, not chips
-//   • Light sliders colored to match brightness level
-//   • Everything breathes — spacing is generous and intentional
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Dashboard — Your home, at a glance
+// Architecture: Hero → Room Carousel → Atmosphere Grid → Quick Switches
+// Rooms open as a detail sheet — no engineering lists on the main screen
+// ═══════════════════════════════════════════════════════════════════════════════
 
 class DashboardScreen extends StatefulWidget {
   final AppState  appState;
@@ -29,1513 +23,977 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen>
-    with TickerProviderStateMixin {
+class _DashboardScreenState extends State<DashboardScreen> {
+  AppState get _st => widget.appState;
 
-  late final AnimationController _fadeCtrl;
-  late final Animation<double>   _fadeAnim;
-  late final StreamSubscription<SnackMsg> _snackSub;
+  // ── Time context ──────────────────────────────────────────────────────────
 
-  final Map<String, bool> _roomCollapsed = {};
-  Set<int> _favoriteChannels = {};
-
-  AppState get _s => widget.appState;
-
-  @override
-  void initState() {
-    super.initState();
-    _fadeCtrl = AnimationController(vsync: this, duration: Dur.enter);
-    _fadeAnim = CurvedAnimation(parent: _fadeCtrl, curve: Cur.enter);
-    _fadeCtrl.forward();
-    _snackSub = _s.snackStream.listen(_showSnack);
-    _loadFavorites();
-  }
-
-  @override
-  void dispose() {
-    _snackSub.cancel();
-    _fadeCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _loadFavorites() async {
-    final favs = await FavoritesService.load();
-    if (mounted) setState(() => _favoriteChannels = favs);
-  }
-
-  Future<void> _toggleFavorite(int ch) async {
-    HapticFeedback.mediumImpact();
-    final next = Set<int>.from(_favoriteChannels);
-    next.contains(ch) ? next.remove(ch) : next.add(ch);
-    setState(() => _favoriteChannels = next);
-    await FavoritesService.save(next);
-  }
-
-  void _showSnack(SnackMsg msg) {
-    if (!mounted) return;
-    AppToast.show(context, msg.text, kind: switch (msg.severity) {
-      SnackSeverity.success => ToastKind.success,
-      SnackSeverity.warning => ToastKind.warning,
-      SnackSeverity.error   => ToastKind.error,
-      SnackSeverity.info    => ToastKind.info,
-    });
-  }
-
-  bool _isCollapsed(String room) => _roomCollapsed[room] ?? false;
-
-  void _toggleRoom(String room) {
-    HapticFeedback.selectionClick();
-    setState(() => _roomCollapsed[room] = !_isCollapsed(room));
-  }
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _s,
-    builder: (_, _) => FadeTransition(
-      opacity: _fadeAnim,
-      child: Scaffold(
-        backgroundColor: C.bg,
-        body: SafeArea(
-          bottom: false,
-          child: Column(children: [
-            _DashHeader(appState: _s, authState: widget.authState),
-            if (!_s.connected && !_s.connecting) OfflineBanner(serverUrl: _s.baseUrl),
-            Expanded(child: _buildBody()),
-          ]),
-        ),
-      ),
-    ),
-  );
-
-  Widget _buildBody() {
-    if (_s.connected && _s.daliDevices.isEmpty) return _LoadingContent();
-    if (!_s.connected && _s.daliDevices.isEmpty) return _offlineBody();
-
-    final rooms = _s.rooms.isNotEmpty ? _s.rooms : <String>['All Lights'];
-
-    return RefreshIndicator(
-      onRefresh: _s.refresh, color: C.accent,
-      backgroundColor: C.card, strokeWidth: 2,
-      child: CustomScrollView(
-        physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-        slivers: [
-          // ── Greeting ────────────────────────────────────────────────────
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, 0),
-            sliver: SliverToBoxAdapter(
-              child: _Greeting(appState: _s, authState: widget.authState),
-            ),
-          ),
-
-          // ── Favourites row (conditional) ────────────────────────────────
-          if (_favoriteChannels.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(
-                child: _FavouritesRow(
-                  appState: _s,
-                  channels: _favoriteChannels,
-                  onToggle: _toggleFavorite,
-                ),
-              ),
-            ),
-
-          // ── Summary stats ───────────────────────────────────────────────
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-            sliver: SliverToBoxAdapter(child: _SummaryCard(appState: _s)),
-          ),
-
-          // ── Scenes ──────────────────────────────────────────────────────
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x8, Sp.x5, 0),
-            sliver: SliverToBoxAdapter(child: _SceneStrip(appState: _s)),
-          ),
-
-          // ── Quick controls ──────────────────────────────────────────────
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x5, Sp.x5, 0),
-            sliver: SliverToBoxAdapter(child: _QuickControls(appState: _s)),
-          ),
-
-          // ── Relays ──────────────────────────────────────────────────────
-          if (_s.relayDevices.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _RelaysGrid(appState: _s)),
-            ),
-
-          // ── Curtains ────────────────────────────────────────────────────
-          if (_s.curtainDevices.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _CurtainsPanel(appState: _s)),
-            ),
-
-          // ── Appliances ──────────────────────────────────────────────────
-          if (_s.applianceDevices.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _AppliancesGrid(appState: _s)),
-            ),
-
-          // ── Security ────────────────────────────────────────────────────
-          if (_s.securityAvailable)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _SecurityPanel(appState: _s)),
-            ),
-
-          // ── Sensors ─────────────────────────────────────────────────────
-          if (_s.doorSensors.isNotEmpty || _s.windowSensors.isNotEmpty || _s.motionSensors.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _SensorsPanel(appState: _s)),
-            ),
-
-          // ── Room cards ──────────────────────────────────────────────────
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (_, i) => Padding(
-                padding: EdgeInsets.fromLTRB(Sp.x5, i == 0 ? Sp.x8 : Sp.x3, Sp.x5, 0),
-                child: _RoomCard(
-                  room:     rooms[i],
-                  appState: _s,
-                  collapsed:        _isCollapsed(rooms[i]),
-                  onToggle:         () => _toggleRoom(rooms[i]),
-                  favoriteChannels: _favoriteChannels,
-                  onToggleFavorite: _toggleFavorite,
-                ),
-              ),
-              childCount: rooms.length,
-            ),
-          ),
-
-          // ── Fallback (no device metadata) ────────────────────────────────
-          if (_s.daliDevices.isEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _RawChannelsFallback(appState: _s)),
-            ),
-
-          // ── Recent activity ─────────────────────────────────────────────
-          if (_s.log.isNotEmpty)
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x6, Sp.x5, 0),
-              sliver: SliverToBoxAdapter(child: _RecentActivity(appState: _s)),
-            ),
-
-          const SliverPadding(padding: EdgeInsets.only(bottom: Sp.x12)),
-        ],
-      ),
-    );
-  }
-
-  Widget _offlineBody() => SingleChildScrollView(
-    physics: const BouncingScrollPhysics(),
-    padding: const EdgeInsets.all(Sp.x6),
-    child: Column(children: [
-      const SizedBox(height: Sp.x10),
-      Container(
-        width: 88, height: 88,
-        decoration: BoxDecoration(
-          color: C.red.withAlpha(14),
-          borderRadius: BorderRadius.circular(26),
-          border: Border.all(color: C.red.withAlpha(40), width: 0.5),
-        ),
-        child: const Icon(Icons.wifi_off_rounded, color: C.red, size: 40),
-      ),
-      const SizedBox(height: Sp.x6),
-      Text('No Connection', style: AppText.h1),
-      const SizedBox(height: Sp.x2),
-      Text('Check your server settings', style: AppText.body.copyWith(color: C.textSec)),
-    ]),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Header — minimal, breathable. No latency chip (technical jargon).
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _DashHeader extends StatelessWidget {
-  final AppState  appState;
-  final AuthState authState;
-  const _DashHeader({required this.appState, required this.authState});
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x2),
-    child: Row(children: [
-      // Brand mark
-      Container(
-        width: 36, height: 36,
-        decoration: BoxDecoration(
-          gradient: G.accent,
-          borderRadius: BorderRadius.circular(11),
-          boxShadow: S.accentGlow,
-        ),
-        child: const Icon(Icons.bolt_rounded, size: 20, color: Colors.black),
-      ),
-      const SizedBox(width: Sp.x3),
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Lugh', style: GoogleFonts.inter(
-          fontSize: 15, fontWeight: FontWeight.w800,
-          color: C.textPri, letterSpacing: -0.5,
-        )),
-        Text('by IQS', style: AppText.small.copyWith(
-          color: C.textTri, letterSpacing: 1.2, fontSize: 10,
-        )),
-      ]),
-      const Spacer(),
-      StatusPill(connected: appState.connected),
-    ]),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Greeting — large, warm, personal
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _Greeting extends StatelessWidget {
-  final AppState  appState;
-  final AuthState authState;
-  const _Greeting({required this.appState, required this.authState});
-
-  String get _time {
+  static String _greeting() {
     final h = DateTime.now().hour;
-    if (h < 5)  return 'Good Night';
-    if (h < 12) return 'Good Morning';
-    if (h < 17) return 'Good Afternoon';
-    return 'Good Evening';
+    if (h >= 5  && h < 12) return 'Good morning';
+    if (h >= 12 && h < 17) return 'Good afternoon';
+    if (h >= 17 && h < 21) return 'Good evening';
+    return 'Good night';
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final name  = authState.user?.firstName.trim();
-    final house = authState.apartmentName;
-    final armed     = appState.securityAvailable && appState.effectiveAlarmArmed;
-    final triggered = appState.securityAvailable && appState.alarmTriggered;
-
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(
-        name?.isNotEmpty == true ? '$_time, $name' : _time,
-        style: AppText.hero.copyWith(fontSize: 30),
-      ),
-      const SizedBox(height: Sp.x2),
-      Row(children: [
-        Icon(Icons.home_rounded, size: 14, color: C.textTri),
-        const SizedBox(width: 5),
-        Flexible(child: Text(house ?? 'Welcome home', style: AppText.small)),
-        if (appState.securityAvailable) ...[
-          const SizedBox(width: Sp.x3),
-          _SecurityPill(armed: armed, triggered: triggered),
-        ],
-      ]),
-    ]);
+  static List<Color> _timeColors() {
+    final h = DateTime.now().hour;
+    if (h >= 5  && h < 9)  return [const Color(0xFF2A1200), const Color(0xFF0A0400)];
+    if (h >= 9  && h < 17) return [const Color(0xFF030820), const Color(0xFF010412)];
+    if (h >= 17 && h < 21) return [const Color(0xFF200700), const Color(0xFF0A0300)];
+    return [const Color(0xFF00051A), const Color(0xFF010310)];
   }
-}
 
-class _SecurityPill extends StatelessWidget {
-  final bool armed;
-  final bool triggered;
-  const _SecurityPill({required this.armed, required this.triggered});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = triggered ? C.red : (armed ? C.orange : C.green);
-    final icon  = triggered ? Icons.warning_rounded
-        : (armed ? Icons.lock_rounded : Icons.home_rounded);
-    final label = triggered ? 'Alert' : (armed ? 'Secured' : 'Home');
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withAlpha(18),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: color.withAlpha(55), width: 0.5),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, size: 10, color: color),
-        const SizedBox(width: 4),
-        Text(label, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: color)),
-      ]),
-    );
+  static IconData _timeIcon() {
+    final h = DateTime.now().hour;
+    if (h >= 5  && h < 9)  return Icons.wb_sunny_rounded;
+    if (h >= 9  && h < 17) return Icons.light_mode_rounded;
+    if (h >= 17 && h < 21) return Icons.wb_twilight_rounded;
+    return Icons.bedtime_rounded;
   }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Favourites — compact horizontal quick-access row
-// ─────────────────────────────────────────────────────────────────────────────
+  // ── Room visual palette ───────────────────────────────────────────────────
 
-class _FavouritesRow extends StatelessWidget {
-  final AppState      appState;
-  final Set<int>      channels;
-  final void Function(int) onToggle;
-  const _FavouritesRow({required this.appState, required this.channels, required this.onToggle});
+  static Color _roomColor(String r) {
+    final n = r.toLowerCase();
+    if (n.contains('living'))                       return const Color(0xFF5BA8FF);
+    if (n.contains('kitchen'))                      return const Color(0xFFFD9A3E);
+    if (n.contains('bedroom') || n.contains('bed')) return const Color(0xFF9F7BFA);
+    if (n.contains('bath'))                         return const Color(0xFF26D4BE);
+    if (n.contains('dining'))                       return const Color(0xFFFD6A3E);
+    if (n.contains('garden') || n.contains('yard')) return const Color(0xFF66BB6A);
+    if (n.contains('hall'))                         return const Color(0xFF7CB0E8);
+    if (n.contains('cinema') || n.contains('media'))return const Color(0xFFCE93D8);
+    if (n.contains('office') || n.contains('study'))return const Color(0xFF64B5F6);
+    if (n.contains('kids')   || n.contains('child'))return const Color(0xFFFF8A65);
+    if (n.contains('garage'))                       return const Color(0xFF90A4AE);
+    return C.accent;
+  }
 
-  @override
-  Widget build(BuildContext context) {
-    final devices = channels
-        .map((ch) => appState.daliDevices.where((d) => d.channel == ch).firstOrNull)
-        .whereType<DaliDevice>()
-        .toList();
-    if (devices.isEmpty) return const SizedBox.shrink();
+  static IconData _roomIcon(String r) {
+    final n = r.toLowerCase();
+    if (n.contains('living'))                       return Icons.weekend_rounded;
+    if (n.contains('kitchen'))                      return Icons.soup_kitchen_rounded;
+    if (n.contains('bedroom') || n.contains('bed')) return Icons.king_bed_rounded;
+    if (n.contains('bath'))                         return Icons.bathtub_rounded;
+    if (n.contains('dining'))                       return Icons.restaurant_rounded;
+    if (n.contains('garden') || n.contains('yard')) return Icons.yard_rounded;
+    if (n.contains('hall'))                         return Icons.meeting_room_rounded;
+    if (n.contains('cinema') || n.contains('media'))return Icons.movie_rounded;
+    if (n.contains('office') || n.contains('study'))return Icons.computer_rounded;
+    if (n.contains('kids')   || n.contains('child'))return Icons.child_care_rounded;
+    if (n.contains('garage'))                       return Icons.garage_rounded;
+    return Icons.room_rounded;
+  }
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Favourites', style: AppText.small.copyWith(
-        color: C.textTri, fontWeight: FontWeight.w700, letterSpacing: 1.2, fontSize: 10,
-      )),
-      const SizedBox(height: Sp.x3),
-      SizedBox(
-        height: 88,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          physics: const BouncingScrollPhysics(),
-          itemCount: devices.length,
-          separatorBuilder: (_, _) => const SizedBox(width: Sp.x3),
-          itemBuilder: (_, i) => _FavTile(
-            device: devices[i], appState: appState,
-            onLongPress: () => onToggle(devices[i].channel),
-          ),
+  static Color _brightnessToColor(int pct) {
+    if (pct == 0)  return C.textTri;
+    if (pct < 20)  return C.purple;
+    if (pct < 45)  return C.blue;
+    if (pct < 70)  return C.orange;
+    return C.accent;
+  }
+
+  // ── Live state helpers ────────────────────────────────────────────────────
+
+  int  _brightness(int ch) => _st.pendingBrightness[ch] ?? _st.state.dali[ch]  ?? 0;
+  bool _relayOn(int ch)    => _st.pendingRelay[ch]      ?? _st.state.relays[ch] ?? false;
+
+  List<DaliDevice>  _lights(String room) => _st.daliDevices .where((d) => d.room == room).toList();
+  List<RelayDevice> _relays(String room) => _st.relayDevices.where((d) => d.room == room).toList();
+  int _onCount(String room) => _lights(room).where((d) => _brightness(d.channel) > 0).length;
+
+  // ── Room sheet ────────────────────────────────────────────────────────────
+
+  void _openRoom(String room) {
+    HapticFeedback.mediumImpact();
+    showModalBottomSheet(
+      context:            context,
+      isScrollControlled: true,
+      backgroundColor:    Colors.transparent,
+      builder: (_) => ListenableBuilder(
+        listenable: _st,
+        builder: (_, __) => _RoomSheet(
+          room:       room,
+          color:      _roomColor(room),
+          icon:       _roomIcon(room),
+          lights:     _lights(room),
+          relays:     _relays(room),
+          brightness: _brightness,
+          relayOn:    _relayOn,
+          bColor:     _brightnessToColor,
+          onSetLight: (ch, v) => _st.setDaliBrightness(ch, v),
+          onSetRoom:  (pct)   => _st.setRoomBrightness(room, pct),
+          onSetRelay: (ch, v) => _st.setRelay(ch, v),
         ),
-      ),
-    ]);
-  }
-}
-
-class _FavTile extends StatelessWidget {
-  final DaliDevice device;
-  final AppState   appState;
-  final VoidCallback onLongPress;
-  const _FavTile({required this.device, required this.appState, required this.onLongPress});
-
-  @override
-  Widget build(BuildContext context) {
-    final pct   = appState.effectiveBrightness(device.channel);
-    final on    = pct > 0;
-    final color = _brightness2color(pct);
-    return TapScale(
-      onTap: () => appState.setDaliBrightness(device.channel, on ? 0 : 100),
-      onLongPress: onLongPress,
-      child: AnimatedContainer(
-        duration: Dur.normal,
-        width: 88,
-        decoration: BoxDecoration(
-          gradient: on ? G.room(color) : null,
-          color:    on ? null : C.card,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: on ? color.withAlpha(60) : C.border, width: 0.5),
-          boxShadow: on ? S.ambientGlow(color) : S.card,
-        ),
-        padding: const EdgeInsets.all(Sp.x3),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Icon(on ? Icons.lightbulb_rounded : Icons.lightbulb_outline_rounded,
-              color: on ? color : C.textTri, size: 22),
-          const Spacer(),
-          Text(device.name, maxLines: 1, overflow: TextOverflow.ellipsis,
-              style: AppText.bodyMed.copyWith(fontSize: 12, color: C.textPri)),
-          Text('$pct%', style: GoogleFonts.inter(
-            fontSize: 11, fontWeight: FontWeight.w700, color: color,
-            fontFeatures: [const FontFeature.tabularFigures()],
-          )),
-        ]),
       ),
     );
   }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Home Status Card — what users actually care about right now
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SummaryCard extends StatelessWidget {
-  final AppState appState;
-  const _SummaryCard({required this.appState});
+  // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final on    = appState.lightsOnCount;
-    final total = appState.daliDevices.length;
-    if (total == 0) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: _st,
+      builder: (_, __) {
+        final rooms   = _st.rooms;
+        final totalOn = _st.daliDevices.where((d) => _brightness(d.channel) > 0).length;
 
-    final activeScene = appState.activeSceneIndex != null
-        ? LightScene.presets[appState.activeSceneIndex!] : null;
-    final armed     = appState.securityAvailable && appState.effectiveAlarmArmed;
-    final triggered = appState.securityAvailable && appState.alarmTriggered;
+        return Scaffold(
+          backgroundColor: C.bg,
+          body: CustomScrollView(
+            physics: const BouncingScrollPhysics(),
+            slivers: [
 
-    return AppCard(
-      child: Padding(
-        padding: const EdgeInsets.all(Sp.x5),
-        child: Row(children: [
-          // Left — lights status
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(
-                on == 0 ? 'All lights off' : '$on light${on == 1 ? '' : 's'} on',
-                style: AppText.title.copyWith(
-                  color: on > 0 ? C.textPri : C.textSec,
-                  fontSize: 15,
+              // ── Collapsing hero ──────────────────────────────────────────
+              SliverAppBar(
+                expandedHeight: 226,
+                pinned:    true,
+                stretch:   true,
+                backgroundColor: C.surface,
+                surfaceTintColor: Colors.transparent,
+                elevation: 0,
+                scrolledUnderElevation: 0,
+                title: _PinnedHeader(appState: _st),
+                titleSpacing: 0,
+                flexibleSpace: FlexibleSpaceBar(
+                  collapseMode: CollapseMode.parallax,
+                  stretchModes: const [StretchMode.zoomBackground],
+                  background: _HeroBanner(
+                    greeting: _greeting(),
+                    bgColors: _timeColors(),
+                    timeIcon: _timeIcon(),
+                    totalOn:  totalOn,
+                    aptId:    _st.state.apartmentId,
+                    appState: _st,
+                  ),
                 ),
               ),
-              if (activeScene != null) ...[
-                const SizedBox(height: Sp.x1),
-                Row(children: [
-                  Icon(activeScene.icon, size: 12, color: activeScene.color),
-                  const SizedBox(width: 5),
-                  Text(activeScene.name, style: AppText.small.copyWith(
-                    color: activeScene.color, fontWeight: FontWeight.w600,
-                  )),
-                ]),
-              ] else if (on > 0) ...[
-                const SizedBox(height: Sp.x1),
-                Text('Manual control', style: AppText.small),
-              ],
-            ]),
-          ),
-          // Right — security status (if available)
-          if (appState.securityAvailable) ...[
-            Container(width: 0.5, height: 36, color: C.border),
-            const SizedBox(width: Sp.x4),
-            Column(children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: triggered ? C.red.withAlpha(20)
-                      : (armed ? C.orange.withAlpha(18) : C.green.withAlpha(16)),
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(
-                    color: triggered ? C.red.withAlpha(60)
-                        : (armed ? C.orange.withAlpha(55) : C.green.withAlpha(45)),
-                    width: 0.5,
-                  ),
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(
-                    triggered ? Icons.warning_rounded
-                        : (armed ? Icons.lock_rounded : Icons.home_rounded),
-                    size: 11,
-                    color: triggered ? C.red : (armed ? C.orange : C.green),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    triggered ? 'Alert' : (armed ? 'Secured' : 'Home'),
-                    style: GoogleFonts.inter(
-                      fontSize: 11, fontWeight: FontWeight.w700,
-                      color: triggered ? C.red : (armed ? C.orange : C.green),
+
+              // ── Scrollable body ──────────────────────────────────────────
+              SliverToBoxAdapter(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+
+                    // ── Room carousel ──────────────────────────────────────
+                    if (rooms.isNotEmpty) ...[
+                      _SectionLabel('your spaces', badge: '${rooms.length}', top: 28),
+                      const SizedBox(height: 14),
+                      SizedBox(
+                        height: 186,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          itemCount: rooms.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 12),
+                          itemBuilder: (_, i) {
+                            final room    = rooms[i];
+                            final onCount = _onCount(room);
+                            final total   = _lights(room).length;
+                            return _RoomCard(
+                              room:    room,
+                              icon:    _roomIcon(room),
+                              color:   _roomColor(room),
+                              onCount: onCount,
+                              total:   total,
+                              onTap:   () => _openRoom(room),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+
+                    // ── Atmosphere / scenes ────────────────────────────────
+                    _SectionLabel('atmosphere', top: 28),
+                    const SizedBox(height: 14),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: _SceneGrid(appState: _st),
                     ),
-                  ),
-                ]),
+
+                    // ── Relay switches ─────────────────────────────────────
+                    if (_st.relayDevices.isNotEmpty) ...[
+                      _SectionLabel('switches', top: 28),
+                      const SizedBox(height: 14),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: _SwitchGrid(
+                          devices:  _st.relayDevices,
+                          relayOn:  _relayOn,
+                          onToggle: (ch, v) => _st.setRelay(ch, v),
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(height: 36),
+                  ],
+                ),
               ),
-            ]),
-          ],
-        ]),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Scene strip — large cards, not chips. Each scene has its own visual identity.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SceneStrip extends StatelessWidget {
-  final AppState appState;
-  const _SceneStrip({required this.appState});
-
-  @override
-  Widget build(BuildContext context) => SizedBox(
-    height: 84,
-    child: ListView.separated(
-      scrollDirection: Axis.horizontal,
-      physics: const BouncingScrollPhysics(),
-      itemCount: LightScene.presets.length,
-      separatorBuilder: (_, _) => const SizedBox(width: Sp.x3),
-      itemBuilder: (_, i) {
-        final scene    = LightScene.presets[i];
-        final selected = appState.activeSceneIndex == i;
-        return TapScale(
-          onTap: () => appState.applyScene(scene, i),
-          child: AnimatedContainer(
-            duration: Dur.normal, curve: Cur.snap,
-            width: 110,
-            decoration: BoxDecoration(
-              gradient: selected ? scene.gradient : null,
-              color:    selected ? null : C.card,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(
-                color: selected ? scene.color.withAlpha(100) : C.border,
-                width: selected ? 1.0 : 0.5,
-              ),
-              boxShadow: selected ? S.colorGlow(scene.color, alpha: 70) : S.card,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x3),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Icon(scene.icon,
-                    color: selected ? scene.color : C.textTri, size: 22),
-                const Spacer(),
-                Text(scene.name, style: GoogleFonts.inter(
-                  fontSize: 13, fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  color: selected ? scene.color : C.textSec,
-                )),
-              ]),
-            ),
+            ],
           ),
         );
       },
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Quick controls — three prominent buttons
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _QuickControls extends StatelessWidget {
-  final AppState appState;
-  const _QuickControls({required this.appState});
-
-  @override
-  Widget build(BuildContext context) => Row(children: [
-    Expanded(child: _ControlBtn(
-      label: 'All On', icon: Icons.wb_sunny_rounded, color: C.accent,
-      onTap: () => appState.setAllDaliBrightness(100),
-    )),
-    const SizedBox(width: Sp.x3),
-    Expanded(child: _ControlBtn(
-      label: 'All Off', icon: Icons.nightlight_rounded, color: C.textSec,
-      onTap: () => appState.setAllDaliBrightness(0),
-    )),
-    const SizedBox(width: Sp.x3),
-    Expanded(child: _ControlBtn(
-      label: '50%', icon: Icons.brightness_medium_rounded, color: C.blue,
-      onTap: () => appState.setAllDaliBrightness(50),
-    )),
-  ]);
-}
-
-class _ControlBtn extends StatelessWidget {
-  final String    label;
-  final IconData  icon;
-  final Color     color;
-  final VoidCallback onTap;
-  const _ControlBtn({required this.label, required this.icon, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => TapScale(
-    onTap: onTap,
-    child: Container(
-      height: 64,
-      decoration: BoxDecoration(
-        color: color.withAlpha(14),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: color.withAlpha(40), width: 0.5),
-        boxShadow: S.card,
-      ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(icon, color: color, size: 24),
-        const SizedBox(height: 5),
-        Text(label, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
-      ]),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Relays — card-based rows, not a tag cloud
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _RelaysGrid extends StatelessWidget {
-  final AppState appState;
-  const _RelaysGrid({required this.appState});
-
-  @override
-  Widget build(BuildContext context) => AppCard(
-        child: Column(
-          children: List.generate(appState.relayDevices.length, (i) {
-            final relay = appState.relayDevices[i];
-            final on    = appState.effectiveRelay(relay.channel);
-            return Column(children: [
-              if (i > 0) const AppDivider(indent: EdgeInsets.only(left: 68)),
-              InkWell(
-                onTap: () => appState.setRelay(relay.channel, !on),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: Sp.x4, vertical: Sp.x4),
-                  child: Row(children: [
-                    AnimatedContainer(
-                      duration: Dur.normal,
-                      width: 44, height: 44,
-                      decoration: BoxDecoration(
-                        color: on ? C.green.withAlpha(22) : C.elevated,
-                        borderRadius: BorderRadius.circular(13),
-                        boxShadow: on ? S.colorGlow(C.green, alpha: 50) : null,
-                      ),
-                      child: Icon(Icons.toggle_on_rounded,
-                          color: on ? C.green : C.textTri, size: 22),
-                    ),
-                    const SizedBox(width: Sp.x3),
-                    Expanded(child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(relay.name, style: AppText.title.copyWith(fontSize: 14)),
-                        Text(on ? 'On' : 'Off',
-                            style: AppText.small.copyWith(color: on ? C.green : C.textTri)),
-                      ],
-                    )),
-                    DeviceIndicator(on: on, onColor: C.green),
-                  ]),
-                ),
-              ),
-            ]);
-          }),
-        ),
-      );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Curtains
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _CurtainsPanel extends StatelessWidget {
-  final AppState appState;
-  const _CurtainsPanel({required this.appState});
-
-  static const _labels = {0: 'Stopped', 1: 'Opening', 2: 'Closing'};
-  static const _colors = {0: C.textTri, 1: C.blue, 2: C.orange};
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Row(children: [
-        const Spacer(),
-        _CurtainQuick(icon: Icons.arrow_upward_rounded, label: 'Up',   color: C.blue,    onTap: () => appState.setCurtainAll(1)),
-        const SizedBox(width: Sp.x2),
-        _CurtainQuick(icon: Icons.stop_rounded,         label: 'Stop', color: C.textSec, onTap: () => appState.setCurtainAll(0)),
-        const SizedBox(width: Sp.x2),
-        _CurtainQuick(icon: Icons.arrow_downward_rounded, label: 'Down', color: C.orange, onTap: () => appState.setCurtainAll(2)),
-      ]),
-      const SizedBox(height: Sp.x3),
-      AppCard(
-        child: Column(children: List.generate(appState.curtainDevices.length, (i) {
-          final c = appState.curtainDevices[i];
-          final state = appState.effectiveCurtain(c.index);
-          final color = _colors[state] ?? C.textTri;
-          return Column(children: [
-            if (i > 0) const AppDivider(indent: EdgeInsets.only(left: Sp.x4)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x4),
-              child: Row(children: [
-                DeviceIndicator(on: state != 0, onColor: color, size: 10),
-                const SizedBox(width: Sp.x3),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(c.name, style: AppText.title.copyWith(fontSize: 14)),
-                  Text('${c.room} · ${_labels[state] ?? ''}', style: AppText.small.copyWith(fontSize: 10)),
-                ])),
-                Row(children: [
-                  _CurtainBtn(icon: Icons.arrow_upward_rounded,   color: C.blue,    active: state == 1, onTap: () => appState.setCurtain(c.index, state == 1 ? 0 : 1)),
-                  const SizedBox(width: Sp.x1),
-                  _CurtainBtn(icon: Icons.stop_rounded,           color: C.textSec, active: state == 0, onTap: () => appState.setCurtain(c.index, 0)),
-                  const SizedBox(width: Sp.x1),
-                  _CurtainBtn(icon: Icons.arrow_downward_rounded, color: C.orange,  active: state == 2, onTap: () => appState.setCurtain(c.index, state == 2 ? 0 : 2)),
-                ]),
-              ]),
-            ),
-          ]);
-        })),
-      ),
-    ],
-  );
-}
-
-class _CurtainQuick extends StatelessWidget {
-  final IconData icon; final String label; final Color color; final VoidCallback onTap;
-  const _CurtainQuick({required this.icon, required this.label, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => TapScale(
-    onTap: onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withAlpha(14), borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withAlpha(40), width: 0.5),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, color: color, size: 13),
-        const SizedBox(width: 4),
-        Text(label, style: AppText.small.copyWith(color: color, fontWeight: FontWeight.w700, fontSize: 11)),
-      ]),
-    ),
-  );
-}
-
-class _CurtainBtn extends StatelessWidget {
-  final IconData icon; final Color color; final bool active; final VoidCallback onTap;
-  const _CurtainBtn({required this.icon, required this.color, required this.active, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => TapScale(
-    onTap: onTap,
-    child: AnimatedContainer(
-      duration: Dur.fast, width: 38, height: 38,
-      decoration: BoxDecoration(
-        color: active ? color.withAlpha(24) : C.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: active ? color.withAlpha(80) : C.border, width: 0.5),
-      ),
-      child: Icon(icon, color: active ? color : C.textTri, size: 16),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Appliances — card rows, not tag cloud
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _AppliancesGrid extends StatelessWidget {
-  final AppState appState;
-  const _AppliancesGrid({required this.appState});
-
-  static IconData _icon(String gvl) => switch (gvl) {
-    'Fridge'        => Icons.kitchen_rounded,
-    'CoffeeMachine' => Icons.coffee_rounded,
-    'Microwave'     => Icons.microwave_rounded,
-    _               => Icons.power_rounded,
-  };
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      AppCard(
-        child: Column(children: List.generate(appState.applianceDevices.length, (i) {
-          final ap = appState.applianceDevices[i];
-          final on = appState.effectiveAppliance(ap.gvlName);
-          return Column(children: [
-            if (i > 0) const AppDivider(indent: EdgeInsets.only(left: 68)),
-            InkWell(
-              onTap: () => appState.setAppliance(ap.gvlName, !on),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: Sp.x4, vertical: Sp.x4),
-                child: Row(children: [
-                  AnimatedContainer(
-                    duration: Dur.normal,
-                    width: 44, height: 44,
-                    decoration: BoxDecoration(
-                      color: on ? C.green.withAlpha(20) : C.elevated,
-                      borderRadius: BorderRadius.circular(13),
-                    ),
-                    child: Icon(_icon(ap.gvlName), color: on ? C.green : C.textTri, size: 20),
-                  ),
-                  const SizedBox(width: Sp.x3),
-                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(ap.name, style: AppText.title.copyWith(fontSize: 14)),
-                    Text(on ? 'On' : 'Off', style: AppText.small.copyWith(color: on ? C.green : C.textTri)),
-                  ])),
-                  DeviceIndicator(on: on, onColor: C.green),
-                ]),
-              ),
-            ),
-          ]);
-        })),
-      ),
-    ],
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Security — bold, immediately readable
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SecurityPanel extends StatelessWidget {
-  final AppState appState;
-  const _SecurityPanel({required this.appState});
-
-  @override
-  Widget build(BuildContext context) {
-    final armed     = appState.effectiveAlarmArmed;
-    final lockdown  = appState.effectiveLockdown;
-    final triggered = appState.alarmTriggered;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      
-      if (triggered)
-        Container(
-          margin: const EdgeInsets.only(bottom: Sp.x3),
-          padding: const EdgeInsets.symmetric(horizontal: Sp.x4, vertical: Sp.x3),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(colors: [C.red.withAlpha(22), C.red.withAlpha(8)]),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: C.red.withAlpha(70), width: 0.5),
-          ),
-          child: Row(children: [
-            const Icon(Icons.warning_rounded, color: C.red, size: 18),
-            const SizedBox(width: Sp.x3),
-            Text('Intrusion detected!', style: AppText.bodyMed.copyWith(color: C.red)),
-          ]),
-        ),
-      Row(children: [
-        Expanded(child: _SecurityTile(
-          icon: armed ? Icons.lock_rounded : Icons.lock_open_rounded,
-          label: armed ? 'Armed'   : 'Disarmed',
-          sub:   armed ? 'Tap to disarm' : 'Tap to arm',
-          color: armed ? C.orange : C.textSec,
-          onTap: () => appState.setAlarm(!armed),
-        )),
-        const SizedBox(width: Sp.x3),
-        Expanded(child: _SecurityTile(
-          icon: lockdown ? Icons.shield_rounded : Icons.shield_outlined,
-          label: lockdown ? 'Lockdown' : 'Normal',
-          sub:   lockdown ? 'Tap to cancel'    : 'Tap to activate',
-          color: lockdown ? C.red : C.textSec,
-          onTap: () => appState.setLockdown(!lockdown),
-        )),
-      ]),
-    ]);
+    );
   }
 }
 
-class _SecurityTile extends StatelessWidget {
-  final IconData icon; final String label; final String sub;
-  final Color color; final VoidCallback onTap;
-  const _SecurityTile({required this.icon, required this.label, required this.sub, required this.color, required this.onTap});
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pinned header (collapsed)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-  @override
-  Widget build(BuildContext context) => TapScale(
-    onTap: onTap,
-    child: AnimatedContainer(
-      duration: Dur.normal,
-      height: 88,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft, end: Alignment.bottomRight,
-          colors: [color.withAlpha(20), color.withAlpha(8)],
-        ),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: color.withAlpha(55), width: 0.5),
-        boxShadow: S.colorGlow(color, alpha: 30),
-      ),
-      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(icon, color: color, size: 28),
-        const SizedBox(height: 6),
-        Text(label, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w800, color: color, letterSpacing: 0.5)),
-        const SizedBox(height: 2),
-        Text(sub, style: AppText.small.copyWith(fontSize: 10)),
-      ]),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Sensors — clean status chips in a proper grid
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _SensorsPanel extends StatelessWidget {
+class _PinnedHeader extends StatelessWidget {
   final AppState appState;
-  const _SensorsPanel({required this.appState});
+  const _PinnedHeader({required this.appState});
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      
-      Wrap(spacing: Sp.x3, runSpacing: Sp.x3, children: [
-        for (final s in appState.doorSensors)
-          _SensorChip(name: s.name, open: appState.state.doorSensors[s.index] ?? false,   icon: Icons.door_front_door_rounded),
-        for (final s in appState.windowSensors)
-          _SensorChip(name: s.name, open: appState.state.windowSensors[s.index] ?? false, icon: Icons.window_rounded),
-        for (final s in appState.motionSensors)
-          _SensorChip(name: s.name, open: appState.state.motionSensors[s.index] ?? false, icon: Icons.sensors_rounded, openLabel: 'Motion', closedLabel: 'Clear'),
-      ]),
-    ],
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 16),
+    child: Row(children: [
+      Container(
+        width: 28, height: 28,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          gradient: G.accent,
+        ),
+        child: const Icon(Icons.bolt_rounded, size: 16, color: Colors.black),
+      ),
+      const SizedBox(width: 8),
+      Expanded(child: Text('Lugh',
+          style: AppText.title.copyWith(letterSpacing: -0.5))),
+      _LiveBadge(appState: appState),
+    ]),
   );
 }
 
-class _SensorChip extends StatelessWidget {
-  final String name; final bool open; final IconData icon;
-  final String openLabel; final String closedLabel;
-  const _SensorChip({required this.name, required this.open, required this.icon, this.openLabel = 'Open', this.closedLabel = 'Closed'});
+// ═══════════════════════════════════════════════════════════════════════════════
+// Live / Offline badge
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _LiveBadge extends StatelessWidget {
+  final AppState appState;
+  const _LiveBadge({required this.appState});
 
   @override
   Widget build(BuildContext context) {
-    final color = open ? C.orange : C.green;
-    return AnimatedContainer(
-      duration: Dur.normal,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+    final live  = appState.connected;
+    final color = live ? C.green : C.red;
+    final label = live ? 'Live'
+        : appState.connecting ? 'Connecting' : 'Offline';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: color.withAlpha(14),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withAlpha(open ? 65 : 35), width: 0.5),
+        color:        color.withAlpha(20),
+        borderRadius: BorderRadius.circular(20),
+        border:       Border.all(color: color.withAlpha(60), width: 0.5),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, color: color, size: 15),
-        const SizedBox(width: 7),
-        Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(name, style: AppText.bodyMed.copyWith(fontSize: 12)),
-          Text(open ? openLabel : closedLabel,
-              style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: color)),
-        ]),
+        Container(
+          width: 6, height: 6,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: color),
+        ),
+        const SizedBox(width: 5),
+        Text(label,
+          style: AppText.small.copyWith(
+            color: color, fontWeight: FontWeight.w600)),
       ]),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Room icon / colour helpers — each room has its own visual identity
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Hero banner (expanded)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-IconData _roomIcon(String name) {
-  final n = name.toLowerCase();
-  if (n.contains('living') || n.contains('lounge') || n.contains('sitting')) {
-    return Icons.weekend_rounded;
-  }
-  if (n.contains('kitchen')) return Icons.soup_kitchen_rounded;
-  if (n.contains('bedroom') || n.contains('master') || n.contains('sleep') || n.contains('guest')) {
-    return Icons.king_bed_rounded;
-  }
-  if (n.contains('bathroom') || n.contains('bath') || n.contains('toilet') || n.contains('wc')) {
-    return Icons.bathtub_rounded;
-  }
-  if (n.contains('office') || n.contains('study') || n.contains('work')) {
-    return Icons.computer_rounded;
-  }
-  if (n.contains('dining')) return Icons.restaurant_rounded;
-  if (n.contains('garage')) return Icons.garage_rounded;
-  if (n.contains('garden') || n.contains('outdoor') || n.contains('yard') || n.contains('patio')) {
-    return Icons.yard_rounded;
-  }
-  if (n.contains('hall') || n.contains('entry') || n.contains('corridor')) {
-    return Icons.meeting_room_rounded;
-  }
-  if (n.contains('gym') || n.contains('fitness')) { return Icons.fitness_center_rounded; }
-  if (n.contains('cinema') || n.contains('media') || n.contains('theater')) {
-    return Icons.movie_rounded;
-  }
-  if (n.contains('kids') || n.contains('child') || n.contains('nursery')) {
-    return Icons.child_care_rounded;
-  }
-  return Icons.lightbulb_outline_rounded;
-}
+class _HeroBanner extends StatelessWidget {
+  final String      greeting;
+  final List<Color> bgColors;
+  final IconData    timeIcon;
+  final int         totalOn;
+  final int         aptId;
+  final AppState    appState;
 
-Color _roomColor(String name) {
-  final n = name.toLowerCase();
-  if (n.contains('living') || n.contains('lounge')) return C.blue;
-  if (n.contains('kitchen')) return C.orange;
-  if (n.contains('bedroom') || n.contains('sleep') || n.contains('master')) return C.purple;
-  if (n.contains('bathroom') || n.contains('bath')) return C.teal;
-  if (n.contains('office') || n.contains('study')) return C.blue;
-  if (n.contains('dining')) return C.orange;
-  if (n.contains('garden') || n.contains('outdoor')) return C.green;
-  if (n.contains('cinema') || n.contains('media')) return C.purple;
-  if (n.contains('kids') || n.contains('child')) return C.green;
-  return C.accent;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Room card — the centrepiece. Glows warmly when lights are on.
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _RoomCard extends StatelessWidget {
-  final String   room;
-  final AppState appState;
-  final bool     collapsed;
-  final VoidCallback onToggle;
-  final Set<int> favoriteChannels;
-  final void Function(int) onToggleFavorite;
-
-  const _RoomCard({
-    required this.room, required this.appState,
-    required this.collapsed, required this.onToggle,
-    required this.favoriteChannels, required this.onToggleFavorite,
+  const _HeroBanner({
+    required this.greeting,
+    required this.bgColors,
+    required this.timeIcon,
+    required this.totalOn,
+    required this.aptId,
+    required this.appState,
   });
 
   @override
   Widget build(BuildContext context) {
-    final devices  = appState.daliDevices.where((d) => d.room == room).toList();
-    if (devices.isEmpty) return const SizedBox.shrink();
+    final isActive   = totalOn > 0;
+    final statusText = isActive
+        ? '$totalOn ${totalOn == 1 ? 'light' : 'lights'} on'
+        : 'All lights off';
 
-    final onCount  = appState.roomLightsOn(room);
-    final total    = devices.length;
-    final isLit    = onCount > 0;
-    final roomColor = _roomColor(room);
-    final roomIcon  = _roomIcon(room);
-    final glowColor = isLit ? roomColor : C.accent;
-
-    return AnimatedContainer(
-      duration: Dur.normal, curve: Cur.smooth,
+    return Container(
       decoration: BoxDecoration(
-        color: C.card,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(
-          color: isLit ? roomColor.withAlpha(60) : C.border, width: 0.5,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end:   Alignment.bottomRight,
+          colors: bgColors,
         ),
-        boxShadow: isLit ? S.ambientGlow(glowColor) : S.card,
       ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(22),
-        child: Column(children: [
-          // ── Room header ─────────────────────────────────────────────────
-          InkWell(
-            onTap: onToggle,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x4, Sp.x4, Sp.x4),
-              child: Row(children: [
-                // Room icon — each room has its own visual identity
-                AnimatedContainer(
-                  duration: Dur.normal,
-                  width: 40, height: 40,
-                  decoration: BoxDecoration(
-                    color: isLit ? roomColor.withAlpha(22) : C.elevated,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: isLit ? S.colorGlow(roomColor, alpha: 50) : null,
-                  ),
-                  child: Icon(roomIcon,
-                      color: isLit ? roomColor : C.textTri, size: 19),
-                ),
-                const SizedBox(width: Sp.x3),
-                Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(room, style: AppText.title),
-                    Text(
-                      onCount == 0 ? 'All off'
-                          : onCount == total ? 'All on'
-                          : '$onCount of $total on',
-                      style: AppText.small.copyWith(
-                        color: isLit ? roomColor : C.textTri,
-                        fontWeight: isLit ? FontWeight.w600 : FontWeight.w400,
-                      ),
-                    ),
-                  ]),
-                ),
-                if (!collapsed) ...[
-                  _RoomBtn(label: 'On',  color: roomColor, onTap: () => appState.setRoomBrightness(room, 100)),
-                  const SizedBox(width: Sp.x2),
-                  _RoomBtn(label: 'Off', color: C.textSec, onTap: () => appState.setRoomBrightness(room, 0)),
-                  const SizedBox(width: Sp.x3),
-                ] else const SizedBox(width: Sp.x2),
-                AnimatedRotation(
-                  turns: collapsed ? -0.25 : 0, duration: Dur.fast,
-                  child: Icon(Icons.expand_more_rounded,
-                      color: isLit ? roomColor.withAlpha(180) : C.textSec, size: 20),
-                ),
-              ]),
-            ),
-          ),
-          // ── Light list ──────────────────────────────────────────────────
-          AnimatedSize(
-            duration: Dur.fast, curve: Cur.snap,
-            child: collapsed
-                ? const SizedBox(width: double.infinity)
-                : Column(children: [
-                    Divider(height: 0.5, thickness: 0.5, color: C.border),
-                    for (int i = 0; i < devices.length; i++) ...[
-                      if (i > 0) Divider(
-                        height: 0.5, thickness: 0.5,
-                        color: C.border, indent: 72, endIndent: Sp.x4,
-                      ),
-                      _LightRow(
-                        device:           devices[i],
-                        appState:         appState,
-                        isFav:            favoriteChannels.contains(devices[i].channel),
-                        onToggleFav:      () => onToggleFavorite(devices[i].channel),
-                      ),
-                    ],
-                  ]),
-          ),
-        ]),
-      ),
-    );
-  }
-}
-
-class _RoomBtn extends StatelessWidget {
-  final String label; final Color color; final VoidCallback onTap;
-  const _RoomBtn({required this.label, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => TapScale(
-    onTap: onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      decoration: BoxDecoration(
-        color: color.withAlpha(16), borderRadius: BorderRadius.circular(9),
-        border: Border.all(color: color.withAlpha(50), width: 0.5),
-      ),
-      child: Text(label, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: color)),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Light row — 48px+ touch target, colored slider matching brightness
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _LightRow extends StatefulWidget {
-  final DaliDevice device;
-  final AppState   appState;
-  final bool       isFav;
-  final VoidCallback onToggleFav;
-  const _LightRow({required this.device, required this.appState, required this.isFav, required this.onToggleFav});
-
-  @override
-  State<_LightRow> createState() => _LightRowState();
-}
-
-class _LightRowState extends State<_LightRow> {
-  double? _dragging;
-
-  int get _pct => _dragging?.toInt() ?? widget.appState.effectiveBrightness(widget.device.channel);
-
-  void _toggle() {
-    HapticFeedback.lightImpact();
-    widget.appState.setDaliBrightness(widget.device.channel, _pct > 0 ? 0 : 100);
-  }
-
-  void _showSheet() {
-    HapticFeedback.mediumImpact();
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: C.card,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
-      builder: (_) => _LightSheet(
-        device: widget.device, current: _pct,
-        appState: widget.appState, isFav: widget.isFav,
-        onToggleFav: widget.onToggleFav,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final pct   = _pct;
-    final color = _brightness2color(pct);
-    final on    = pct > 0;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Sp.x3, Sp.x3, Sp.x4, Sp.x3),
-      child: Row(children: [
-        // Toggle button — 48px touch target
-        TapScale(
-          onTap: _toggle, onLongPress: _showSheet, scale: 0.86,
-          child: AnimatedContainer(
-            duration: Dur.normal,
-            width: 48, height: 48,
+      child: Stack(children: [
+        // Accent orb
+        Positioned(
+          top: -50, right: -30,
+          child: Container(
+            width: 200, height: 200,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: on ? color.withAlpha(22) : C.elevated,
-              border: Border.all(color: on ? color.withAlpha(80) : C.border, width: 0.5),
-              boxShadow: on ? S.colorGlow(color, alpha: 60) : null,
-            ),
-            child: Icon(
-              on ? Icons.lightbulb_rounded : Icons.lightbulb_outline_rounded,
-              color: on ? color : C.textTri, size: 20,
-            ),
-          ),
-        ),
-        const SizedBox(width: Sp.x3),
-        // Name + slider
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Expanded(child: Text(widget.device.name, style: AppText.bodyMed.copyWith(
-              fontWeight: on ? FontWeight.w600 : FontWeight.w400,
-              color: on ? C.textPri : C.textSec, fontSize: 13,
-            ))),
-            AnimatedDefaultTextStyle(
-              duration: Dur.fast,
-              style: GoogleFonts.inter(
-                fontSize: 13, fontWeight: FontWeight.w700, color: color,
-                fontFeatures: [const FontFeature.tabularFigures()],
-              ),
-              child: Text('$pct%'),
-            ),
-          ]),
-          const SizedBox(height: 4),
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 6,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 9),
-              activeTrackColor:   color,
-              inactiveTrackColor: on ? color.withAlpha(25) : C.border,
-              thumbColor:         color,
-              overlayColor:       color.withAlpha(22),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 22),
-            ),
-            child: Slider(
-              value: pct.toDouble(), min: 0, max: 100, divisions: 100,
-              onChanged: (v) { HapticFeedback.selectionClick(); setState(() => _dragging = v); },
-              onChangeEnd: (v) {
-                setState(() => _dragging = null);
-                widget.appState.setDaliBrightness(widget.device.channel, v.toInt());
-              },
-            ),
-          ),
-        ])),
-      ]),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Light bottom sheet — presets + favourite toggle
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _LightSheet extends StatelessWidget {
-  final DaliDevice device;
-  final int current;
-  final AppState appState;
-  final bool isFav;
-  final VoidCallback onToggleFav;
-  const _LightSheet({required this.device, required this.current, required this.appState, required this.isFav, required this.onToggleFav});
-
-  void _set(BuildContext ctx, int pct) {
-    HapticFeedback.lightImpact();
-    appState.setDaliBrightness(device.channel, pct);
-    Navigator.pop(ctx);
-  }
-
-  @override
-  Widget build(BuildContext context) => SafeArea(
-    child: Padding(
-      padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x4, Sp.x5, Sp.x6),
-      child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const BottomSheetHandle(),
-        const SizedBox(height: Sp.x5),
-        Row(children: [
-          Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              color: C.accent.withAlpha(20), borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.lightbulb_rounded, color: C.accent, size: 20),
-          ),
-          const SizedBox(width: Sp.x3),
-          Expanded(child: Text(device.name, style: AppText.title)),
-          Text('$current%', style: AppText.body.copyWith(color: C.textSec)),
-        ]),
-        const SizedBox(height: Sp.x4),
-        // Favourite toggle
-        TapScale(
-          onTap: () { onToggleFav(); Navigator.pop(context); },
-          child: Container(
-            width: double.infinity, height: 48,
-            decoration: BoxDecoration(
-              color: (isFav ? C.accent : C.textTri).withAlpha(14),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: isFav ? C.accent : C.border, width: 0.5),
-            ),
-            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(isFav ? Icons.star_rounded : Icons.star_outline_rounded,
-                  color: isFav ? C.accent : C.textSec, size: 17),
-              const SizedBox(width: Sp.x2),
-              Text(
-                isFav ? 'Remove from Favourites' : 'Add to Favourites',
-                style: AppText.bodyMed.copyWith(color: isFav ? C.accent : C.textSec, fontSize: 13),
-              ),
-            ]),
-          ),
-        ),
-        const SizedBox(height: Sp.x5),
-        // Presets
-        Row(children: [
-          _Preset(label: 'Off',   pct: 0,   color: C.textSec, onTap: (p) => _set(context, p)),
-          const SizedBox(width: Sp.x2),
-          _Preset(label: '25%',  pct: 25,  color: C.purple,  onTap: (p) => _set(context, p)),
-          const SizedBox(width: Sp.x2),
-          _Preset(label: '50%',  pct: 50,  color: C.blue,    onTap: (p) => _set(context, p)),
-          const SizedBox(width: Sp.x2),
-          _Preset(label: '75%',  pct: 75,  color: C.orange,  onTap: (p) => _set(context, p)),
-          const SizedBox(width: Sp.x2),
-          _Preset(label: 'Full', pct: 100, color: C.accent,  onTap: (p) => _set(context, p)),
-        ]),
-      ]),
-    ),
-  );
-}
-
-class _Preset extends StatelessWidget {
-  final String label; final int pct; final Color color;
-  final void Function(int) onTap;
-  const _Preset({required this.label, required this.pct, required this.color, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => Expanded(
-    child: TapScale(
-      onTap: () => onTap(pct),
-      child: Container(
-        height: 60,
-        decoration: BoxDecoration(
-          color: color.withAlpha(16), borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: color.withAlpha(50), width: 0.5),
-        ),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(Icons.lightbulb_rounded, color: color, size: 18),
-          const SizedBox(height: 5),
-          Text(label, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: color)),
-        ]),
-      ),
-    ),
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Recent activity
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _RecentActivity extends StatelessWidget {
-  final AppState appState;
-  const _RecentActivity({required this.appState});
-
-  String _rel(DateTime t) {
-    final d = DateTime.now().difference(t);
-    if (d.inSeconds < 60) return 'now';
-    if (d.inMinutes < 60) return '${d.inMinutes}m';
-    if (d.inHours < 24)   return '${d.inHours}h';
-    return '${d.inDays}d';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final recent = appState.log.reversed.take(3).toList();
-    if (recent.isEmpty) return const SizedBox.shrink();
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      
-      AppCard(
-        child: Column(children: [
-          for (int i = 0; i < recent.length; i++) ...[
-            if (i > 0) const AppDivider(indent: EdgeInsets.only(left: 48)),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Sp.x4, vertical: Sp.x3),
-              child: Row(children: [
-                Container(
-                  width: 24, height: 24,
-                  decoration: BoxDecoration(
-                    color: (recent[i].isError ? C.red : C.green).withAlpha(18),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    recent[i].isError ? Icons.error_rounded : Icons.check_rounded,
-                    size: 13, color: recent[i].isError ? C.red : C.green,
-                  ),
-                ),
-                const SizedBox(width: Sp.x3),
-                Expanded(child: Text(recent[i].message,
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: AppText.body.copyWith(fontSize: 12))),
-                const SizedBox(width: Sp.x2),
-                Text(_rel(recent[i].time), style: AppText.small.copyWith(fontSize: 10)),
+              gradient: RadialGradient(colors: [
+                C.accent.withAlpha(14), Colors.transparent,
               ]),
             ),
-          ],
-        ]),
-      ),
-    ]);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Raw channels fallback
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _RawChannelsFallback extends StatelessWidget {
-  final AppState appState;
-  const _RawChannelsFallback({required this.appState});
-  static const _max = 28;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      Text('DALI channels', style: AppText.small.copyWith(
-        color: C.textTri, fontWeight: FontWeight.w700, letterSpacing: 1.2, fontSize: 10,
-      )),
-      const SizedBox(height: Sp.x3),
-      AppCard(
-        child: Column(children: List.generate(_max, (i) {
-          final ch = i + 1;
-          return Column(children: [
-            if (i > 0) const AppDivider(indent: EdgeInsets.only(left: Sp.x4)),
-            _RawRow(channel: ch, appState: appState),
-          ]);
-        })),
-      ),
-    ],
-  );
-}
-
-class _RawRow extends StatefulWidget {
-  final int channel; final AppState appState;
-  const _RawRow({required this.channel, required this.appState});
-  @override State<_RawRow> createState() => _RawRowState();
-}
-
-class _RawRowState extends State<_RawRow> {
-  double? _drag;
-  int get _pct => _drag?.toInt() ?? widget.appState.effectiveBrightness(widget.channel);
-
-  @override
-  Widget build(BuildContext context) {
-    final pct = _pct; final color = pct > 0 ? C.accent : C.textTri;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(Sp.x4, Sp.x2, Sp.x4, Sp.x2),
-      child: Row(children: [
-        SizedBox(width: 44, child: Text('Ch ${ widget.channel}', style: AppText.small.copyWith(fontSize: 11))),
-        Expanded(child: SliderTheme(
-          data: SliderTheme.of(context).copyWith(
-            trackHeight: 4,
-            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-            activeTrackColor: color, inactiveTrackColor: C.border, thumbColor: color,
           ),
-          child: Slider(
-            value: pct.toDouble(), min: 0, max: 100, divisions: 100,
-            onChanged: (v) => setState(() => _drag = v),
-            onChangeEnd: (v) { setState(() => _drag = null); widget.appState.setDaliBrightness(widget.channel, v.toInt()); },
+        ),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 52, 20, 20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Apartment label
+                Row(children: [
+                  Icon(timeIcon, color: C.accent.withAlpha(150), size: 12),
+                  const SizedBox(width: 6),
+                  Text('Apartment $aptId',
+                    style: AppText.small.copyWith(color: C.textSec)),
+                ]),
+                const SizedBox(height: 8),
+                Text(greeting,
+                  style: GoogleFonts.inter(
+                    fontSize: 26, fontWeight: FontWeight.w700,
+                    color: C.textPri, letterSpacing: -1.0, height: 1.1,
+                  ),
+                ),
+                const Spacer(),
+                // Status + quick actions
+                Row(children: [
+                  // Status pill
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: isActive ? C.accent.withAlpha(18) : Colors.white.withAlpha(7),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: isActive ? C.accent.withAlpha(50) : C.border,
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      AnimatedContainer(
+                        duration: Dur.normal,
+                        width: 6, height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isActive ? C.accent : C.textTri,
+                        ),
+                      ),
+                      const SizedBox(width: 7),
+                      Text(statusText,
+                        style: AppText.small.copyWith(
+                          color: isActive ? C.accent : C.textSec,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ]),
+                  ),
+                  const Spacer(),
+                  // All off
+                  TapScale(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      appState.setAllDaliBrightness(0);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(8),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: C.border, width: 0.5),
+                      ),
+                      child: Text('All off',
+                        style: AppText.small.copyWith(
+                          color: C.textSec, fontWeight: FontWeight.w600)),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // All on
+                  TapScale(
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      appState.setAllDaliBrightness(100);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                      decoration: BoxDecoration(
+                        gradient: G.accent,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(color: C.accent.withAlpha(50), blurRadius: 12),
+                        ],
+                      ),
+                      child: Text('All on',
+                        style: AppText.small.copyWith(
+                          color: Colors.black, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ]),
+              ],
+            ),
           ),
-        )),
-        SizedBox(width: 38, child: Text('$pct%', textAlign: TextAlign.end,
-            style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: color,
-                fontFeatures: [const FontFeature.tabularFigures()]))),
+        ),
       ]),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Loading skeleton
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Section label
+// ═══════════════════════════════════════════════════════════════════════════════
 
-class _LoadingContent extends StatelessWidget {
+class _SectionLabel extends StatelessWidget {
+  final String  label;
+  final String? badge;
+  final double  top;
+  const _SectionLabel(this.label, {this.badge, this.top = 0});
+
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Sp.x5, Sp.x5, Sp.x5, 0),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      ShimmerBox(width: 240, height: 40, radius: 12),
-      const SizedBox(height: Sp.x2),
-      ShimmerBox(width: 140, height: 16, radius: 8),
-      const SizedBox(height: Sp.x8),
-      ShimmerBox(width: double.infinity, height: 76, radius: 20),
-      const SizedBox(height: Sp.x8),
-      SizedBox(height: 84, child: Row(children: [
-        for (int i = 0; i < 3; i++) ...[
-          if (i > 0) const SizedBox(width: Sp.x3),
-          Expanded(child: ShimmerBox(width: double.infinity, height: 84, radius: 18)),
-        ],
-      ])),
-      const SizedBox(height: Sp.x8),
-      for (int r = 0; r < 2; r++) ...[
-        ShimmerBox(width: double.infinity, height: 180, radius: 22),
-        const SizedBox(height: Sp.x3),
+    padding: EdgeInsets.fromLTRB(20, top, 20, 0),
+    child: Row(children: [
+      Text(label.toUpperCase(),
+        style: AppText.small.copyWith(
+          color: C.textTri, fontWeight: FontWeight.w700,
+          letterSpacing: 1.4, fontSize: 10,
+        ),
+      ),
+      if (badge != null) ...[
+        const SizedBox(width: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: C.card2, borderRadius: BorderRadius.circular(6)),
+          child: Text(badge!,
+            style: AppText.small.copyWith(
+              color: C.textSec, fontSize: 9, fontWeight: FontWeight.w700)),
+        ),
       ],
     ]),
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// Room card — horizontal carousel item
+// ═══════════════════════════════════════════════════════════════════════════════
 
-Color _brightness2color(int pct) {
-  if (pct == 0)  return C.textTri;
-  if (pct < 15)  return C.purple;
-  if (pct < 35)  return C.blue;
-  if (pct < 65)  return C.orange;
-  return C.accent;
+class _RoomCard extends StatelessWidget {
+  final String     room;
+  final IconData   icon;
+  final Color      color;
+  final int        onCount;
+  final int        total;
+  final VoidCallback onTap;
+
+  const _RoomCard({
+    required this.room, required this.icon, required this.color,
+    required this.onCount, required this.total, required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final active = onCount > 0;
+    final status = total == 0  ? 'No lights'
+        : onCount == 0         ? 'Off'
+        : onCount == total     ? 'All on'
+        : '$onCount of $total on';
+
+    return TapScale(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: Dur.normal, curve: Cur.snap,
+        width: 148,
+        decoration: BoxDecoration(
+          color: C.card,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: active ? color.withAlpha(55) : C.border, width: 0.5),
+          boxShadow: active
+              ? [
+                  BoxShadow(color: color.withAlpha(30), blurRadius: 24),
+                  BoxShadow(color: Colors.black.withAlpha(60), blurRadius: 12,
+                      offset: const Offset(0, 4)),
+                ]
+              : S.card,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AnimatedContainer(
+                duration: Dur.normal,
+                width: 46, height: 46,
+                decoration: BoxDecoration(
+                  color: active ? color.withAlpha(25) : C.card2,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: active ? color : C.textTri, size: 22),
+              ),
+              const Spacer(),
+              Text(room,
+                style: AppText.bodyMed.copyWith(
+                  fontSize: 13, letterSpacing: -0.3, color: C.textPri),
+                maxLines: 2, overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 3),
+              Text(status,
+                style: AppText.small.copyWith(
+                  color: active ? color : C.textTri, fontSize: 11,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.w400),
+              ),
+              if (total > 0) ...[
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: onCount / total,
+                    backgroundColor: C.border,
+                    valueColor: AlwaysStoppedAnimation(active ? color : C.textTri),
+                    minHeight: 2,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Scene grid — 2-column atmosphere selector
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _SceneGrid extends StatelessWidget {
+  final AppState appState;
+  const _SceneGrid({required this.appState});
+
+  @override
+  Widget build(BuildContext context) {
+    final scenes   = LightScene.presets;
+    final selected = appState.activeSceneIndex;
+
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: scenes.length,
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2, crossAxisSpacing: 12,
+        mainAxisSpacing: 12, childAspectRatio: 1.55,
+      ),
+      itemBuilder: (_, i) {
+        final scene  = scenes[i];
+        final active = selected == i;
+        return TapScale(
+          onTap: () {
+            HapticFeedback.selectionClick();
+            appState.applyScene(scene, i);
+          },
+          child: AnimatedContainer(
+            duration: Dur.normal, curve: Cur.snap,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft, end: Alignment.bottomRight,
+                colors: active
+                    ? [scene.color.withAlpha(45), scene.color.withAlpha(15)]
+                    : [C.card2, C.card],
+              ),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: active ? scene.color.withAlpha(110) : C.border,
+                width: active ? 1.0 : 0.5,
+              ),
+              boxShadow: active
+                  ? [BoxShadow(color: scene.color.withAlpha(35), blurRadius: 16)]
+                  : S.card,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    AnimatedContainer(
+                      duration: Dur.normal,
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        color: active
+                            ? scene.color.withAlpha(35)
+                            : Colors.white.withAlpha(8),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(scene.icon,
+                        color: active ? scene.color : C.textSec, size: 17),
+                    ),
+                    if (active) ...[
+                      const Spacer(),
+                      Container(
+                        width: 6, height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle, color: scene.color),
+                      ),
+                    ],
+                  ]),
+                  const Spacer(),
+                  Text(scene.name,
+                    style: AppText.bodyMed.copyWith(
+                      fontSize: 13,
+                      color: active ? scene.color : C.textSec),
+                  ),
+                  Text('${scene.brightness}% brightness',
+                    style: AppText.small.copyWith(
+                      fontSize: 10,
+                      color: active ? scene.color.withAlpha(160) : C.textTri),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Switch grid — relay controls
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _SwitchGrid extends StatelessWidget {
+  final List<RelayDevice>        devices;
+  final bool Function(int)       relayOn;
+  final void Function(int, bool) onToggle;
+
+  const _SwitchGrid({
+    required this.devices, required this.relayOn, required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) => GridView.builder(
+    shrinkWrap: true,
+    physics: const NeverScrollableScrollPhysics(),
+    itemCount: devices.length,
+    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: 2, crossAxisSpacing: 12,
+      mainAxisSpacing: 12, childAspectRatio: 2.0,
+    ),
+    itemBuilder: (_, i) {
+      final d  = devices[i];
+      final on = relayOn(d.channel);
+      return AnimatedContainer(
+        duration: Dur.normal,
+        decoration: BoxDecoration(
+          color: on ? C.green.withAlpha(15) : C.card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: on ? C.green.withAlpha(60) : C.border, width: 0.5),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(children: [
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  on ? Icons.lightbulb_rounded : Icons.lightbulb_outline_rounded,
+                  color: on ? C.green : C.textTri, size: 18),
+                const SizedBox(height: 6),
+                Text(d.name,
+                  style: AppText.small.copyWith(
+                    color: on ? C.textPri : C.textSec,
+                    fontWeight: on ? FontWeight.w600 : FontWeight.w400,
+                    fontSize: 11),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              ],
+            )),
+            Switch(
+              value: on,
+              onChanged: (v) {
+                HapticFeedback.selectionClick();
+                onToggle(d.channel, v);
+              },
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+          ]),
+        ),
+      );
+    },
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Room sheet — detail panel (modal bottom sheet)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _RoomSheet extends StatelessWidget {
+  final String             room;
+  final Color              color;
+  final IconData           icon;
+  final List<DaliDevice>   lights;
+  final List<RelayDevice>  relays;
+  final int  Function(int)  brightness;
+  final bool Function(int)  relayOn;
+  final Color Function(int) bColor;
+  final void Function(int, int)  onSetLight;
+  final void Function(int)       onSetRoom;
+  final void Function(int, bool) onSetRelay;
+
+  const _RoomSheet({
+    required this.room,   required this.color,  required this.icon,
+    required this.lights, required this.relays,
+    required this.brightness, required this.relayOn, required this.bColor,
+    required this.onSetLight, required this.onSetRoom, required this.onSetRelay,
+  });
+
+  int get _onCount => lights.where((d) => brightness(d.channel) > 0).length;
+
+  @override
+  Widget build(BuildContext context) {
+    final onCount = _onCount;
+    final status  = lights.isEmpty
+        ? 'No lights configured'
+        : onCount == 0
+            ? 'All lights off'
+            : onCount == lights.length
+                ? 'All on'
+                : '$onCount of ${lights.length} on';
+
+    final initSize = lights.isEmpty ? 0.35
+        : lights.length <= 3         ? 0.52
+        : lights.length <= 6         ? 0.70
+        : 0.85;
+
+    return DraggableScrollableSheet(
+      initialChildSize: initSize,
+      minChildSize: 0.28,
+      maxChildSize: 0.95,
+      builder: (_, scrollCtrl) => Container(
+        decoration: BoxDecoration(
+          color: C.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border(top: BorderSide(color: color.withAlpha(40), width: 0.5)),
+        ),
+        child: Column(children: [
+          // Drag handle
+          Padding(
+            padding: const EdgeInsets.only(top: 12, bottom: 4),
+            child: Container(
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: C.textTri.withAlpha(80),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+
+          // Room header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(
+                  color: color.withAlpha(25),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: color, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(room,
+                    style: AppText.h2.copyWith(fontSize: 17, letterSpacing: -0.5)),
+                  Text(status,
+                    style: AppText.small.copyWith(
+                      color: onCount > 0 ? color : C.textTri,
+                      fontWeight: onCount > 0 ? FontWeight.w600 : FontWeight.w400,
+                    )),
+                ],
+              )),
+              if (lights.isNotEmpty) ...[
+                _QuickBtn(
+                  label: 'Off',
+                  onTap: () { HapticFeedback.selectionClick(); onSetRoom(0); },
+                ),
+                const SizedBox(width: 8),
+                _QuickBtn(
+                  label: 'On', accent: true,
+                  onTap: () { HapticFeedback.selectionClick(); onSetRoom(100); },
+                ),
+              ],
+            ]),
+          ),
+
+          Container(height: 0.5, color: C.border),
+
+          // Content
+          Expanded(
+            child: ListView(
+              controller: scrollCtrl,
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+              children: [
+
+                // Light sliders
+                ...lights.map((d) {
+                  final pct  = brightness(d.channel);
+                  final clr  = bColor(pct);
+                  final isOn = pct > 0;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          AnimatedContainer(
+                            duration: Dur.fast,
+                            width: 8, height: 8,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: isOn ? clr : C.border,
+                              boxShadow: isOn
+                                  ? [BoxShadow(color: clr.withAlpha(120), blurRadius: 6)]
+                                  : null,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(d.name,
+                            style: AppText.body.copyWith(
+                              color: isOn ? C.textPri : C.textSec,
+                              fontWeight: isOn ? FontWeight.w600 : FontWeight.w400,
+                            ),
+                          )),
+                          Text('$pct%',
+                            style: AppText.small.copyWith(
+                              color: isOn ? clr : C.textTri,
+                              fontWeight: FontWeight.w700,
+                              fontFeatures: [const FontFeature.tabularFigures()],
+                            ),
+                          ),
+                        ]),
+                        const SizedBox(height: 4),
+                        SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            activeTrackColor:   clr,
+                            thumbColor:         clr,
+                            inactiveTrackColor: C.border2,
+                            overlayColor:       clr.withAlpha(20),
+                            trackHeight:        5,
+                          ),
+                          child: Slider(
+                            value:     pct.toDouble(),
+                            min:       0,
+                            max:       100,
+                            divisions: 20,
+                            onChanged: (v) => onSetLight(d.channel, v.round()),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+
+                // Relay switches in this room
+                if (relays.isNotEmpty) ...[
+                  if (lights.isNotEmpty)
+                    Container(height: 0.5, color: C.border,
+                        margin: const EdgeInsets.only(bottom: 16)),
+                  Wrap(
+                    spacing: 10, runSpacing: 10,
+                    children: relays.map((d) {
+                      final on = relayOn(d.channel);
+                      return TapScale(
+                        onTap: () {
+                          HapticFeedback.selectionClick();
+                          onSetRelay(d.channel, !on);
+                        },
+                        child: AnimatedContainer(
+                          duration: Dur.fast,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: on ? C.green.withAlpha(20) : C.card,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: on ? C.green.withAlpha(80) : C.border,
+                              width: 0.5),
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Container(
+                              width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: on ? C.green : C.textTri,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(d.name,
+                              style: AppText.small.copyWith(
+                                color: on ? C.textPri : C.textSec,
+                                fontWeight: on ? FontWeight.w600 : FontWeight.w400,
+                              )),
+                          ]),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── Quick On/Off button ───────────────────────────────────────────────────────
+
+class _QuickBtn extends StatelessWidget {
+  final String     label;
+  final bool       accent;
+  final VoidCallback onTap;
+  const _QuickBtn({required this.label, required this.onTap, this.accent = false});
+
+  @override
+  Widget build(BuildContext context) => TapScale(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        gradient: accent ? G.accent : null,
+        color:    accent ? null : C.card2,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: accent
+            ? [BoxShadow(color: C.accent.withAlpha(50), blurRadius: 10)]
+            : null,
+        border: accent ? null : Border.all(color: C.border, width: 0.5),
+      ),
+      child: Text(label,
+        style: AppText.small.copyWith(
+          color: accent ? Colors.black : C.textSec,
+          fontWeight: FontWeight.w700,
+        )),
+    ),
+  );
 }
