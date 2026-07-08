@@ -215,8 +215,10 @@ jobs:
           KEY_PASS:       ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
+            # app/build.gradle.kts resolves storeFile relative to android/app/
             printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode \
-              > flutter_application_plc/android/lugh-release.jks
+              > flutter_application_plc/android/app/lugh-release.jks
+            # key.properties lives in android/ (rootProject.file("key.properties"))
             cat > flutter_application_plc/android/key.properties <<EOF
           storeFile=lugh-release.jks
           storePassword=$KEYSTORE_PASS
