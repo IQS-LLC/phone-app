@@ -215,7 +215,7 @@ jobs:
           KEY_PASS:       ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 --decode \
+            printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode \
               > flutter_application_plc/android/lugh-release.jks
             cat > flutter_application_plc/android/key.properties <<EOF
           storeFile=lugh-release.jks
