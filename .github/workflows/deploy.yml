@@ -248,11 +248,13 @@ jobs:
           retention-days: 30
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Deploy to Synology NAS via Docker Compose over SSH
+# 4. Deploy — runs directly on Synology NAS via self-hosted runner
+#    Runner container has /volume1/docker/lugh and /var/run/docker.sock mounted.
+#    No SSH needed — we ARE the server.
 # ─────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy to Production
-    runs-on: [self-hosted, synology]   # Runs on NAS — private IP reachable via LAN
+    runs-on: [self-hosted, synology]
     needs: [build-backend, build-android]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
@@ -263,101 +265,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "${{ secrets.SERVER_SSH_PORT }}" \
-            "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
-
-      - name: Write/update .env on server
+      - name: Write/update .env
         env:
-          HOST:        ${{ secrets.SERVER_HOST }}
-          PORT:        ${{ secrets.SERVER_SSH_PORT }}
-          USER:        ${{ secrets.SERVER_SSH_USER }}
           SECRET_KEY:  ${{ secrets.DJANGO_SECRET_KEY }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -s <<EOF
-            set -e
-            sudo mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
-            printf 'SECRET_KEY=%s\nPOSTGRES_PASSWORD=%s\nDB_PASSWORD=%s\n' \
-              "${SECRET_KEY}" "${DB_PASSWORD}" "${DB_PASSWORD}" \
-              | sudo tee /volume1/docker/lugh/.env > /dev/null
-            sudo chmod 600 /volume1/docker/lugh/.env
-            echo ".env written"
-          EOF
+          mkdir -p /volume1/docker/lugh/postgres_data \
+                   /volume1/docker/lugh/redis_data \
+                   /volume1/docker/lugh/static \
+                   /volume1/docker/lugh/media
+          printf 'SECRET_KEY=%s\nPOSTGRES_PASSWORD=%s\nDB_PASSWORD=%s\n' \
+            "$SECRET_KEY" "$DB_PASSWORD" "$DB_PASSWORD" \
+            > /volume1/docker/lugh/.env
+          chmod 600 /volume1/docker/lugh/.env
+          echo ".env written"
 
-      - name: Copy compose file + nginx config to server
-        env:
-          HOST: ${{ secrets.SERVER_HOST }}
-          PORT: ${{ secrets.SERVER_SSH_PORT }}
-          USER: ${{ secrets.SERVER_SSH_USER }}
+      - name: Copy compose file + nginx config
         run: |
-          # Synology SSH blocks the SCP/SFTP subsystem — pipe files through stdin instead
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
-            "cat > /volume1/docker/lugh/docker-compose.prod.yml" \
-            < docker-compose.prod.yml
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
-            "cat > /volume1/docker/lugh/nginx.conf" \
-            < nginx/nginx.conf
+          cp docker-compose.prod.yml /volume1/docker/lugh/docker-compose.prod.yml
+          cp nginx/nginx.conf        /volume1/docker/lugh/nginx.conf
 
-      - name: Pull new images + recreate app containers
+      - name: Pull new image + recreate stack
         env:
-          SHA_TAG: sha-${{ github.sha }}
-          HOST:    ${{ secrets.SERVER_HOST }}
-          PORT:    ${{ secrets.SERVER_SSH_PORT }}
-          USER:    ${{ secrets.SERVER_SSH_USER }}
+          SHA_TAG:  sha-${{ github.sha }}
           GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
-          DOCKER="/volume1/@appstore/ContainerManager/usr/bin/docker"
-          COMPOSE="$DOCKER compose -f /volume1/docker/lugh/docker-compose.prod.yml"
+          set -euo pipefail
+          COMPOSE_FILE=/volume1/docker/lugh/docker-compose.prod.yml
 
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -s <<EOF
-            set -euo pipefail
-            DOCKER="/volume1/@appstore/ContainerManager/usr/bin/docker"
-            COMPOSE="\$DOCKER compose -f /volume1/docker/lugh/docker-compose.prod.yml"
+          # The runner container has docker CLI + the host socket mounted
+          chmod 666 /var/run/docker.sock
 
-            # Ensure docker socket is accessible
-            sudo chmod 666 /var/run/docker.sock
+          echo "==> GHCR login"
+          echo "$GHCR_PAT" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-            echo "==> GHCR login"
-            echo "${GHCR_PAT}" | \$DOCKER login ghcr.io -u iqs-llc --password-stdin
+          echo "==> Pinning image tag to $SHA_TAG"
+          sed -i "s|ghcr.io/iqs-llc/lugh-django:.*|ghcr.io/iqs-llc/lugh-django:$SHA_TAG|g" \
+            "$COMPOSE_FILE"
 
-            echo "==> Pinning image tag to sha-${SHA_TAG}"
-            sudo sed -i "s|ghcr.io/iqs-llc/lugh-django:.*|ghcr.io/iqs-llc/lugh-django:sha-${SHA_TAG}|g" \
-              /volume1/docker/lugh/docker-compose.prod.yml
+          echo "==> Pulling images"
+          docker compose -f "$COMPOSE_FILE" pull
 
-            echo "==> Pulling images"
-            \$COMPOSE pull
+          echo "==> Starting / updating stack"
+          docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 
-            echo "==> Starting / updating stack"
-            \$COMPOSE up -d --remove-orphans
+          echo "==> Waiting for Django to be healthy (up to 90s)"
+          for i in $(seq 1 18); do
+            STATUS=$(docker inspect lugh_django --format '{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+            echo "  [$i/18] Django health: $STATUS"
+            [ "$STATUS" = "healthy" ] && break
+            [ $i -eq 18 ] && echo "Timed out" && docker compose -f "$COMPOSE_FILE" logs django | tail -30 && exit 1
+            sleep 5
+          done
 
-            echo "==> Waiting for Django to be healthy (up to 90s)"
-            for i in \$(seq 1 18); do
-              STATUS=\$(\$DOCKER inspect lugh_django --format '{{.State.Health.Status}}' 2>/dev/null || echo "missing")
-              echo "  [\$i/18] Django health: \$STATUS"
-              [ "\$STATUS" = "healthy" ] && break
-              [ \$i -eq 18 ] && echo "Timed out waiting for healthy" && \$COMPOSE logs django | tail -30 && exit 1
-              sleep 5
-            done
-
-            echo "==> Stack status"
-            \$COMPOSE ps
-
-            echo "==> Deploy complete"
-          EOF
+          echo "==> Stack status"
+          docker compose -f "$COMPOSE_FILE" ps
+          echo "==> Deploy complete"
 
       - name: Health check
-        env:
-          HOST: ${{ secrets.SERVER_HOST }}
-          PORT: ${{ secrets.SERVER_SSH_PORT }}
-          USER: ${{ secrets.SERVER_SSH_USER }}
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
-            "curl -sf http://localhost:9080/health/ && echo 'Health check PASSED'"
+          curl -sf http://localhost:9080/health/ && echo 'Health check PASSED'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. GitHub Release (only on version tags  v*.*.*)
