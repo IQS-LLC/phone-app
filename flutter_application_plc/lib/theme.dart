@@ -364,9 +364,9 @@ ThemeData buildTheme() {
     highlightColor: Colors.white.withAlpha(8),
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
-        TargetPlatform.android: CupertinoPageTransitionsBuilder(),
-        TargetPlatform.iOS:     CupertinoPageTransitionsBuilder(),
-        TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.android: ZoomPageTransitionsBuilder(),
+        TargetPlatform.iOS:     ZoomPageTransitionsBuilder(),
+        TargetPlatform.windows: ZoomPageTransitionsBuilder(),
       },
     ),
   );
