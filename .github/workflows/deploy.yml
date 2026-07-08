@@ -219,12 +219,9 @@ jobs:
             printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]' | base64 --decode \
               > flutter_application_plc/android/app/lugh-release.jks
             # key.properties lives in android/ (rootProject.file("key.properties"))
-            cat > flutter_application_plc/android/key.properties <<EOF
-          storeFile=lugh-release.jks
-          storePassword=$KEYSTORE_PASS
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEY_PASS
-          EOF
+            printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+              "lugh-release.jks" "$KEYSTORE_PASS" "$KEY_ALIAS" "$KEY_PASS" \
+              > flutter_application_plc/android/key.properties
             echo "Release signing configured"
           else
             echo "ANDROID_KEYSTORE_B64 not set — APK will use debug signing"
