@@ -257,6 +257,9 @@ jobs:
     needs: [build-backend, build-android]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - uses: actions/checkout@v4
@@ -307,7 +310,7 @@ jobs:
           HOST:    ${{ secrets.SERVER_HOST }}
           PORT:    ${{ secrets.SERVER_SSH_PORT }}
           USER:    ${{ secrets.SERVER_SSH_USER }}
-          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
           DOCKER="/volume1/@appstore/ContainerManager/usr/bin/docker"
           COMPOSE="$DOCKER compose -f /volume1/docker/lugh/docker-compose.prod.yml"
