@@ -304,9 +304,9 @@ flutter run -d emulator-5554
 
 ## 🎯 Next Steps
 
-1. **For emulator testing:** Run `start_local.bat`
-2. **For phone testing:** Run `start_lan.bat`
-3. **For production:** Update `config.env` and use `start_demo.ps1`
+1. **For emulator testing:** Run `.\start_project.ps1 -Mode local`
+2. **For phone testing:** Run `.\start_project.ps1 -Mode lan`
+3. **For production:** Update `config.env` (see Part 10 deployment docs)
 4. **For real PLC:** Currently running mock mode (fallback when real PLC unavailable)
 5. **To control from anywhere:** Deploy backend to cloud, update API endpoint
 
@@ -325,8 +325,8 @@ When building for real deployment:
 ---
 
 **Easy demo ready?** Just run:
-```bash
-.\start_local.bat
+```powershell
+.\start_project.ps1 -Mode local
 ```
 
 Everything else is automatic! 🎉

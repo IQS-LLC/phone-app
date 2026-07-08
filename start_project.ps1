@@ -1,16 +1,19 @@
 param(
     [string]$Mode = "",
     [string]$IP = "",
-    [switch]$UseDocker,
     [switch]$SkipFlutter,
     [switch]$Debug
 )
 
-# PLC Project Launcher
-# Interactive launcher for Django backend and Flutter frontend
+# PLC Project Launcher - local dev loop for Django + Flutter.
+#
+# Starts Django bound to 0.0.0.0:8000 (reachable from both the Android
+# emulator and real devices on the LAN), creates/updates a "devtest" user +
+# PLCDevice via bootstrap_dev_user so the app's login screen has something
+# to sign in with, then launches Flutter. Does NOT modify any source files.
 
 $projectRoot = Split-Path $MyInvocation.MyCommand.Path
-$djangoPath = $projectRoot
+$djangoPath  = $projectRoot
 $flutterPath = "$projectRoot\flutter_application_plc"
 
 function Write-Header {
@@ -22,183 +25,151 @@ function Write-Header {
 }
 
 function Get-LocalIP {
-    $ip = (Get-NetIPAddress | Where-Object { $_.AddressFamily -eq "IPv4" -and $_.InterfaceAlias -notlike "*Loopback*" } | Select-Object -First 1).IPAddress
-    return $ip
+    # Prefer an adapter that actually has a default gateway (real Wi-Fi/Ethernet),
+    # skipping virtual adapters (Hyper-V, WSL, VPN, Docker NAT) that otherwise
+    # tend to sort first and silently break "lan" mode.
+    $candidate = Get-NetIPConfiguration |
+        Where-Object { $_.IPv4DefaultGateway -and $_.IPv4Address } |
+        Select-Object -First 1
+    if ($candidate) { return $candidate.IPv4Address.IPAddress }
+
+    # Fallback: any non-loopback IPv4 address.
+    return (Get-NetIPAddress | Where-Object {
+        $_.AddressFamily -eq "IPv4" -and $_.InterfaceAlias -notlike "*Loopback*"
+    } | Select-Object -First 1).IPAddress
+}
+
+function Get-PythonExe {
+    $venvPython = "$djangoPath\.venv\Scripts\python.exe"
+    if (Test-Path $venvPython) { return $venvPython }
+    return "python"   # fall back to whatever's on PATH
 }
 
 function Check-Emulator {
-    $emulatorRunning = $false
     try {
         $devices = & flutter devices 2>$null | Select-String "emulator"
-        if ($devices) { $emulatorRunning = $true }
-    } catch {}
-    return $emulatorRunning
-}
-
-function Check-Docker {
-    try {
-        $dockerVersion = docker --version 2>$null
-        return $true
-    } catch {
-        return $false
-    }
+        return [bool]$devices
+    } catch { return $false }
 }
 
 function Start-Django {
-    param([string]$ip = "0.0.0.0", [int]$port = 8000, [bool]$useDocker = $false)
+    param([int]$port = 8000)
 
-    if ($useDocker) {
-        Write-Host "Starting Django with Docker..." -ForegroundColor Green
-        Push-Location $djangoPath
+    Write-Host "Starting Django on 0.0.0.0:$port (PLC_MOCK=True)..." -ForegroundColor Green
+    Push-Location $djangoPath
+    $pythonExe = Get-PythonExe
 
-        # Try new docker compose syntax first, fall back to old
-        try {
-            & docker compose up -d django 2>$null
-        } catch {
-            try {
-                & docker-compose up -d django 2>$null
-            } catch {
-                Write-Host "Docker Compose not available. Please install Docker Desktop." -ForegroundColor Red
-                return $false
-            }
-        }
+    & $pythonExe manage.py migrate 2>$null | Out-Null
 
-        Pop-Location
+    $env:PLC_MOCK = "True"
+    if ($Debug) {
+        Write-Host "Debug mode: running Django in foreground" -ForegroundColor Yellow
+        & $pythonExe manage.py runserver "0.0.0.0:$port"
     } else {
-        Write-Host "Starting Django locally..." -ForegroundColor Green
-        Push-Location $djangoPath
-
-        $pythonExe = "$djangoPath\.venv\Scripts\python.exe"
-        if (!(Test-Path $pythonExe)) {
-            Write-Host "Virtual environment not found. Please run: python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt" -ForegroundColor Red
-            return $false
-        }
-
-        # Run migrations
-        & $pythonExe manage.py migrate 2>$null | Out-Null
-
-        # Start server
-        $serverCmd = "$pythonExe manage.py runserver ${ip}:$port"
-        if ($Debug) {
-            Write-Host "Debug mode: Running Django in foreground" -ForegroundColor Yellow
-            & $pythonExe manage.py runserver ${ip}:$port
-        } else {
-            Write-Host "Starting Django server on ${ip}:$port" -ForegroundColor Green
-            Start-Process -FilePath $pythonExe -ArgumentList "manage.py", "runserver", "${ip}:$port" -NoNewWindow
-        }
-
-        Pop-Location
+        Start-Process -FilePath $pythonExe `
+            -ArgumentList "manage.py", "runserver", "0.0.0.0:$port" `
+            -NoNewWindow
     }
+    Pop-Location
     return $true
 }
 
-function Start-Flutter {
-    param([string]$apiEndpoint)
+function Bootstrap-DevUser {
+    param([string]$clientIp)
 
+    Write-Host "Bootstrapping dev user + PLCDevice (ip=$clientIp)..." -ForegroundColor Green
+    Push-Location $djangoPath
+    $pythonExe = Get-PythonExe
+    & $pythonExe manage.py bootstrap_dev_user --ip $clientIp
+    Pop-Location
+}
+
+function Start-Flutter {
     Write-Host "Starting Flutter app..." -ForegroundColor Green
     Push-Location $flutterPath
-
-    # Configure API endpoint
-    $mainDart = "lib/main.dart"
-    if (Test-Path $mainDart) {
-        # This is a simple replacement - in real app, might need more sophisticated config
-        $content = Get-Content $mainDart -Raw
-        $newContent = $content -replace 'http://[^:]+:8000', $apiEndpoint
-        Set-Content $mainDart $newContent
-    }
-
     if ($Debug) {
         & flutter run --debug
     } else {
         & flutter run
     }
-
     Pop-Location
 }
 
-# Main logic
+# --- Main --------------------------------------------------------------
+
 Write-Header
 
-# Auto-detect capabilities
-$hasDocker = Check-Docker
 $emulatorRunning = Check-Emulator
-$localIP = Get-LocalIP
+$localIP         = Get-LocalIP
 
 Write-Host "System Detection:" -ForegroundColor Yellow
-Write-Host "  Docker available: $hasDocker"
 Write-Host "  Emulator running: $emulatorRunning"
-Write-Host "  Local IP: $localIP"
+Write-Host "  Local IP:         $localIP"
 Write-Host ""
 
-# Interactive mode if no parameters
 if ($Mode -eq "") {
     Write-Host "Select mode:" -ForegroundColor Yellow
     Write-Host "  1. Local (Android Emulator)"
-    Write-Host "  2. LAN (Real device on same network)"
+    Write-Host "  2. LAN (real device on same WiFi)"
     Write-Host "  3. Custom IP"
-    Write-Host "  4. Docker mode"
-    $choice = Read-Host "Enter choice (1-4)"
-
+    $choice = Read-Host "Enter choice (1-3)"
     switch ($choice) {
         "1" { $Mode = "local" }
         "2" { $Mode = "lan" }
         "3" { $Mode = "custom" }
-        "4" { $Mode = "docker"; $UseDocker = $true }
-        default { Write-Host "Invalid choice" -ForegroundColor Red; exit }
+        default { Write-Host "Invalid choice" -ForegroundColor Red; exit 1 }
     }
 }
 
-# Determine IP and endpoint
-$apiEndpoint = ""
+# clientIp is what the PHONE/EMULATOR uses to reach this PC - distinct from
+# the bind address, which is always 0.0.0.0 so every mode can be served by
+# one Django process.
 switch ($Mode) {
     "local" {
-        if ($emulatorRunning) {
-            $apiEndpoint = "http://10.0.2.2:8000"
-            Write-Host "Using emulator endpoint: $apiEndpoint" -ForegroundColor Green
-        } else {
-            Write-Host "No emulator detected. Starting anyway..." -ForegroundColor Yellow
-            $apiEndpoint = "http://127.0.0.1:8000"
-        }
+        $clientIp = "10.0.2.2"   # Android emulator's alias for the host machine
+        Write-Host "Emulator client endpoint: http://${clientIp}:8000" -ForegroundColor Green
     }
     "lan" {
-        $apiEndpoint = "http://$localIP`:8000"
-        Write-Host "Using LAN endpoint: $apiEndpoint" -ForegroundColor Green
-        Write-Host "Make sure your device is on the same WiFi network!" -ForegroundColor Yellow
+        if (-not $localIP) {
+            Write-Host "Could not auto-detect a LAN IP - pass -IP explicitly." -ForegroundColor Red
+            exit 1
+        }
+        $clientIp = $localIP
+        Write-Host "LAN client endpoint: http://${clientIp}:8000" -ForegroundColor Green
+        Write-Host "Make sure your phone is on the same WiFi network." -ForegroundColor Yellow
     }
     "custom" {
-        if ($IP -eq "") {
-            $IP = Read-Host "Enter custom IP address"
-        }
-        $apiEndpoint = "http://$IP`:8000"
-        Write-Host "Using custom endpoint: $apiEndpoint" -ForegroundColor Green
+        if ($IP -eq "") { $IP = Read-Host "Enter the IP your device should use" }
+        $clientIp = $IP
+        Write-Host "Custom client endpoint: http://${clientIp}:8000" -ForegroundColor Green
     }
-    "docker" {
-        $apiEndpoint = "http://127.0.0.1:8000"
-        Write-Host "Using Docker endpoint: $apiEndpoint" -ForegroundColor Green
+    default {
+        Write-Host "Unknown mode '$Mode'" -ForegroundColor Red
+        exit 1
     }
 }
 
-# Ask about Docker if not specified
-if (!$UseDocker -and $hasDocker -and $Mode -ne "docker") {
-    $useDockerChoice = Read-Host "Use Docker for Django? (y/n)"
-    if ($useDockerChoice -eq "y") { $UseDocker = $true }
-}
-
-# Start Django
-$djangoStarted = Start-Django -ip ($apiEndpoint -replace "http://", "" -replace ":8000", "") -useDocker $UseDocker
-if (!$djangoStarted) {
+if (-not (Start-Django)) {
     Write-Host "Failed to start Django" -ForegroundColor Red
     exit 1
 }
 
-# Wait a bit for Django to start
 Start-Sleep -Seconds 3
+Bootstrap-DevUser -clientIp $clientIp
 
-# Start Flutter if not skipped
-if (!$SkipFlutter) {
-    Start-Flutter -apiEndpoint $apiEndpoint
-} else {
+Write-Host ""
+Write-Host "Type these into the app's login screen:" -ForegroundColor Cyan
+Write-Host "  Server address: http://${clientIp}:8000"
+Write-Host "  Username:       devtest"
+Write-Host "  Password:       DevTest12345"
+Write-Host ""
+
+if ($SkipFlutter) {
     Write-Host "Django started. Flutter skipped." -ForegroundColor Green
-    Write-Host "API available at: $apiEndpoint" -ForegroundColor Cyan
     Read-Host "Press Enter to exit"
+} else {
+    if ($Mode -eq "local" -and -not $emulatorRunning) {
+        Write-Host "No emulator detected - launch one from Android Studio or 'flutter emulators --launch <id>' first." -ForegroundColor Yellow
+    }
+    Start-Flutter
 }

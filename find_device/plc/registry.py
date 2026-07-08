@@ -1,14 +1,23 @@
 """
-DeviceRegistry — singleton that owns the ADSClient and all device objects.
+DeviceRegistry — singleton (per apartment) that owns the ADSClient and all
+device objects for one Beckhoff CX.
 
-Default layout reflects the current TwinCAT project:
-  - 16 DALI dimmers  (channels 1-16)
-  - 4  wall relays   (channels 1-4)
-  - First 4 switch inputs registered (extend as hardware grows)
+Multi-apartment design
+───────────────────────
+Apartment-specific data (rooms, DALI channels, relays, switches, ...) lives
+in the database now — see find_device.models.Apartment/Room/ApartmentDevice
+— not in a hardcoded dict in this file. Adding apartment #501 means adding
+rows through the installer workflow / Django admin, not editing source code.
 
-Rooms / names can be reconfigured here without touching any other file.
-New devices are added by calling registry.add_dali(), add_relay(), or
-add_switch() at startup (e.g. from Django AppConfig.ready()).
+self.apartment_id is the Apartment model's primary key. One Django process
+can hold many simultaneous ADS connections: call DeviceRegistry.for_apartment
+(apartment_pk) to get (or lazily create) the registry for that apartment —
+this is what every /plc/* view does, resolving apartment_pk from the
+authenticated user's ApartmentMembership, never from client input.
+
+The registry reads the ADS connection address from that Apartment's own
+PLCDevice (a 1:1 relationship) so it can be changed without touching source
+code. PLC_MOCK=True in env always wins (safe for dev/CI).
 """
 from __future__ import annotations
 
@@ -18,97 +27,127 @@ import threading
 from typing import Dict, List, Optional
 
 from .ads_client import ADSClient
-from .devices import DaliChannel, WallRelay, SwitchInput
+from .devices import (
+    DaliChannel, WallRelay, SwitchInput,
+    CurtainMotor, ApplianceRelay,
+    MagneticSensor, MotionSensor, SecurityController,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ── Default device layout ─────────────────────────────────────────────────────
-# Edit room names and light names here as the installation grows.
-# The channel / index numbers MUST match the PLC GVL array indices.
-
-_DEFAULT_DALI: list[dict] = [
-    # channel, name,              room
-    dict(channel=1,  name='Light 1',  room='Living Room'),
-    dict(channel=2,  name='Light 2',  room='Living Room'),
-    dict(channel=3,  name='Light 3',  room='Living Room'),
-    dict(channel=4,  name='Light 4',  room='Living Room'),
-    dict(channel=5,  name='Light 5',  room='Dining Room'),
-    dict(channel=6,  name='Light 6',  room='Dining Room'),
-    dict(channel=7,  name='Light 7',  room='Dining Room'),
-    dict(channel=8,  name='Light 8',  room='Dining Room'),
-    dict(channel=9,  name='Light 9',  room='Bedroom 1'),
-    dict(channel=10, name='Light 10', room='Bedroom 1'),
-    dict(channel=11, name='Light 11', room='Bedroom 2'),
-    dict(channel=12, name='Light 12', room='Bedroom 2'),
-    dict(channel=13, name='Light 13', room='Kitchen'),
-    dict(channel=14, name='Light 14', room='Kitchen'),
-    dict(channel=15, name='Light 15', room='Hallway'),
-    dict(channel=16, name='Light 16', room='Hallway'),
-]
-
-_DEFAULT_RELAYS: list[dict] = [
-    dict(channel=1, name='Wall Light 1', room='Living Room'),
-    dict(channel=2, name='Wall Light 2', room='Living Room'),
-    dict(channel=3, name='Wall Light 3', room='Hallway'),
-    dict(channel=4, name='Wall Light 4', room='Hallway'),
-]
-
-_DEFAULT_SWITCHES: list[dict] = [
-    # index, name,          room
-    dict(index=1, name='Switch 1', room='Living Room'),
-    dict(index=2, name='Switch 2', room='Living Room'),
-    dict(index=3, name='Switch 3', room='Hallway'),
-    dict(index=4, name='Switch 4', room='Hallway'),
-]
-
-
-# ── Registry ──────────────────────────────────────────────────────────────────
-
 class DeviceRegistry:
     """
-    Central registry for all PLC devices.
+    Central registry for all PLC devices in one apartment.
 
-    Thread-safe singleton.  All device objects share one ADSClient.
+    One instance per apartment, cached in _apt_instances. Use
+    DeviceRegistry.for_apartment(apartment_pk) to get the registry for a
+    specific apartment — this is the only entry point views.py should use.
     """
 
-    _instance:       Optional['DeviceRegistry'] = None
-    _instance_lock   = threading.Lock()
+    # Per-apartment instances (for multi-tenant use)
+    _apt_instances: Dict[int, 'DeviceRegistry'] = {}
+    _apt_lock       = threading.Lock()
 
-    def __init__(self):
+    def __init__(self, apartment_id: int):
+        self.apartment_id = apartment_id
         mock = os.getenv('PLC_MOCK', 'True').lower() == 'true'
         self._client = ADSClient(
             netid=os.getenv('PLC_NETID', '5.168.214.75.1.1'),
             ip   =os.getenv('PLC_IP',    '192.168.0.161'),
             mock =mock,
         )
-        self._dali:     Dict[int, DaliChannel]  = {}
-        self._relays:   Dict[int, WallRelay]    = {}
-        self._switches: Dict[int, SwitchInput]  = {}
-        self._lock      = threading.RLock()
-        self._started   = False
+        self._dali:           Dict[int, DaliChannel]      = {}
+        self._relays:         Dict[int, WallRelay]        = {}
+        self._switches:       Dict[int, SwitchInput]      = {}
+        self._curtains:       Dict[int, CurtainMotor]     = {}
+        self._appliances:     Dict[str, ApplianceRelay]   = {}
+        self._door_sensors:   Dict[int, MagneticSensor]  = {}
+        self._window_sensors: Dict[int, MagneticSensor]  = {}
+        self._motion_sensors: Dict[int, MotionSensor]    = {}
+        self._security:       Optional[SecurityController] = None
+        self._lock    = threading.RLock()
+        self._started = False
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
     def _start(self):
         if self._started:
             return
+
+        from django.apps import apps
+        Apartment       = apps.get_model('find_device', 'Apartment')
+        ApartmentDevice = apps.get_model('find_device', 'ApartmentDevice')
+
+        apartment = Apartment.objects.filter(pk=self.apartment_id).first()
+        if apartment is None:
+            logger.warning(
+                "DeviceRegistry[apt%s]: no Apartment row with this ID — "
+                "registry will start with zero devices.", self.apartment_id,
+            )
+
+        # ADS connection target comes from this apartment's own PLCDevice —
+        # never a global "is_default" lookup across every user's devices.
+        # PLC_MOCK=True in env always wins (safe for dev/CI).
+        if not self._client.mock and apartment is not None:
+            device = getattr(apartment, 'plc_device', None)
+            if device is not None and device.is_active:
+                self._client.netid = device.ams_net_id
+                self._client.ip    = device.ip_address
+                logger.info(
+                    "DeviceRegistry[apt%s]: using PLCDevice '%s' (%s @ %s)",
+                    self.apartment_id, device.name,
+                    device.ams_net_id, device.ip_address,
+                )
+            else:
+                logger.warning(
+                    "DeviceRegistry[apt%s]: no PLCDevice registered for "
+                    "this apartment yet — install it via the installer "
+                    "workflow before going off mock.", self.apartment_id,
+                )
+
         ok = self._client.connect()
         if not ok and not self._client.mock:
-            logger.warning("Real PLC unavailable — running in mock mode")
+            logger.warning(
+                "DeviceRegistry[apt%s]: PLC unreachable — falling back to mock",
+                self.apartment_id,
+            )
             self._client.mock = True
             self._client.connect()
-        for d in _DEFAULT_DALI:
-            self.add_dali(**d)
-        for r in _DEFAULT_RELAYS:
-            self.add_relay(**r)
-        for s in _DEFAULT_SWITCHES:
-            self.add_switch(**s)
+
+        if apartment is not None:
+            for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
+                room_name = d.room.name if d.room else 'Unassigned'
+                if d.device_type == ApartmentDevice.TYPE_DALI:
+                    self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_RELAY:
+                    self.add_relay(channel=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_SWITCH:
+                    self.add_switch(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_CURTAIN:
+                    self.add_curtain(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_APPLIANCE:
+                    self.add_appliance(gvl_name=d.gvl_name, display_name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_DOOR_SENSOR:
+                    self.add_door_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_WINDOW_SENSOR:
+                    self.add_window_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+                elif d.device_type == ApartmentDevice.TYPE_MOTION_SENSOR:
+                    self.add_motion_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+
+        # No security hardware exists in any apartment's I/O config yet
+        # (no gvlIO, no key-switch/alarm/lockdown terminals). Wire this up
+        # once a real ApartmentDevice/security row exists.
+
         self._started = True
         logger.info(
-            "DeviceRegistry ready: %d DALI channels, %d relays, %d switches  mock=%s",
-            len(self._dali), len(self._relays), len(self._switches),
-            self._client.mock,
+            "DeviceRegistry[apt%s] ready: %d DALI, %d relays, %d curtains, "
+            "%d switches, %d door, %d window, %d motion, %d appliances  mock=%s",
+            self.apartment_id,
+            len(self._dali), len(self._relays), len(self._curtains),
+            len(self._switches), len(self._door_sensors),
+            len(self._window_sensors), len(self._motion_sensors),
+            len(self._appliances), self._client.mock,
         )
 
     # ── Registration helpers ──────────────────────────────────────────────────
@@ -121,85 +160,207 @@ class DeviceRegistry:
         with self._lock:
             self._relays[channel] = WallRelay(channel, name, room, self._client)
 
+    def add_curtain(self, index: int, name: str, room: str):
+        with self._lock:
+            self._curtains[index] = CurtainMotor(index, name, room, self._client)
+
     def add_switch(self, index: int, name: str, room: str):
         with self._lock:
             self._switches[index] = SwitchInput(index, name, room, self._client)
 
+    def add_door_sensor(self, index: int, name: str, room: str):
+        with self._lock:
+            self._door_sensors[index] = MagneticSensor(
+                index, 'door', name, room, self._client)
+
+    def add_window_sensor(self, index: int, name: str, room: str):
+        with self._lock:
+            self._window_sensors[index] = MagneticSensor(
+                index, 'window', name, room, self._client)
+
+    def add_motion_sensor(self, index: int, name: str, room: str):
+        with self._lock:
+            self._motion_sensors[index] = MotionSensor(
+                index, name, room, self._client)
+
+    def add_appliance(self, gvl_name: str, display_name: str, room: str):
+        with self._lock:
+            self._appliances[gvl_name] = ApplianceRelay(
+                gvl_name, display_name, room, self._client)
+
     # ── Accessors ─────────────────────────────────────────────────────────────
 
-    def dali(self, channel: int) -> Optional[DaliChannel]:
-        return self._dali.get(channel)
+    def dali(self, channel: int)       -> Optional[DaliChannel]:      return self._dali.get(channel)
+    def relay(self, channel: int)      -> Optional[WallRelay]:        return self._relays.get(channel)
+    def curtain(self, index: int)      -> Optional[CurtainMotor]:     return self._curtains.get(index)
+    def switch(self, index: int)       -> Optional[SwitchInput]:      return self._switches.get(index)
+    def appliance(self, gvl_name: str) -> Optional[ApplianceRelay]:  return self._appliances.get(gvl_name)
+    def door_sensor(self, index: int)  -> Optional[MagneticSensor]:  return self._door_sensors.get(index)
+    def window_sensor(self, index: int)-> Optional[MagneticSensor]:  return self._window_sensors.get(index)
+    def motion_sensor(self, index: int)-> Optional[MotionSensor]:    return self._motion_sensors.get(index)
 
-    def relay(self, channel: int) -> Optional[WallRelay]:
-        return self._relays.get(channel)
-
-    def switch(self, index: int) -> Optional[SwitchInput]:
-        return self._switches.get(index)
-
-    def all_dali(self)     -> List[DaliChannel]:  return list(self._dali.values())
-    def all_relays(self)   -> List[WallRelay]:    return list(self._relays.values())
-    def all_switches(self) -> List[SwitchInput]:  return list(self._switches.values())
+    def security(self)            -> Optional[SecurityController]: return self._security
+    def all_dali(self)            -> List[DaliChannel]:     return list(self._dali.values())
+    def all_relays(self)          -> List[WallRelay]:       return list(self._relays.values())
+    def all_curtains(self)        -> List[CurtainMotor]:    return list(self._curtains.values())
+    def all_switches(self)        -> List[SwitchInput]:     return list(self._switches.values())
+    def all_appliances(self)      -> List[ApplianceRelay]:  return list(self._appliances.values())
+    def all_door_sensors(self)    -> List[MagneticSensor]:  return list(self._door_sensors.values())
+    def all_window_sensors(self)  -> List[MagneticSensor]:  return list(self._window_sensors.values())
+    def all_motion_sensors(self)  -> List[MotionSensor]:    return list(self._motion_sensors.values())
 
     def rooms(self) -> List[str]:
         seen, result = set(), []
-        for d in (*self._dali.values(), *self._relays.values()):
+        for d in (*self._dali.values(), *self._relays.values(), *self._curtains.values()):
             if d.room not in seen:
                 seen.add(d.room)
                 result.append(d.room)
         return result
 
     @property
-    def mock(self) -> bool:
-        return self._client.mock
-
+    def mock(self)      -> bool: return self._client.mock
     @property
-    def connected(self) -> bool:
-        return self._client.is_connected
+    def connected(self) -> bool: return self._client.is_connected
 
-    # ── Bulk state read ───────────────────────────────────────────────────────
+    # ── Batched ADS read ──────────────────────────────────────────────────────
+    # Folds N per-device ADS round trips into a single read_list_by_name() sum
+    # read (pyads.Connection.read_list_by_name / ADSClient.read_batch). Falls
+    # back to per-device reads in mock mode, where there is no real ADS round
+    # trip to save.
+
+    def _batch_read_group(self, devices: dict) -> dict:
+        if not devices:
+            return {}
+
+        if self._client.mock:
+            result = {}
+            for key, dev in devices.items():
+                try:
+                    result[key] = (
+                        dev.read_actual_level() if hasattr(dev, 'read_actual_level')
+                        else dev.read_state()
+                    )
+                except Exception as exc:
+                    logger.error("mock read %s[%s]: %s", type(dev).__name__, key, exc)
+                    result[key] = None
+            return result
+
+        type_map = {dev.batch_var: dev.batch_plctype for dev in devices.values()}
+        raw = self._client.read_batch(type_map)
+        result = {}
+        for key, dev in devices.items():
+            if dev.batch_var in raw:
+                try:
+                    result[key] = dev.decode_batch(raw[dev.batch_var])
+                except Exception as exc:
+                    logger.error("decode %s: %s", dev.batch_var, exc)
+                    result[key] = None
+            else:
+                result[key] = None
+        if not raw:
+            logger.error(
+                "batch read failed for %d device(s) starting at %s",
+                len(devices), next(iter(type_map), '?'),
+            )
+        return result
+
+    # ── Full state read (hot path — called every 2 s by Flutter poll) ─────────
 
     def read_full_state(self) -> dict:
-        """
-        Returns the complete system state in one dict.
-        Used by GET /plc/state/ for efficient polling.
-        """
-        dali_levels, relay_states, switch_states = {}, {}, {}
+        dali_levels  = self._batch_read_group(self._dali)
+        relay_states = self._batch_read_group(self._relays)
 
-        for ch, dev in self._dali.items():
-            try:
-                dali_levels[ch] = dev.read_actual_level()
-            except Exception as exc:
-                logger.error("DALI ch%d read error: %s", ch, exc)
-                dali_levels[ch] = None
+        curtain_states = {}
+        switch_states, appliance_states = {}, {}
+        door_states, window_states, motion_states = {}, {}, {}
 
-        for ch, dev in self._relays.items():
+        for idx, dev in self._curtains.items():
             try:
-                relay_states[ch] = dev.read_state()
+                curtain_states[idx] = dev.read_state()
             except Exception as exc:
-                logger.error("Relay ch%d read error: %s", ch, exc)
-                relay_states[ch] = None
+                logger.error("Curtain %d read: %s", idx, exc)
+                curtain_states[idx] = None
 
         for idx, dev in self._switches.items():
             try:
                 switch_states[idx] = dev.read_state()
             except Exception as exc:
-                logger.error("Switch %d read error: %s", idx, exc)
+                logger.error("Switch %d read: %s", idx, exc)
                 switch_states[idx] = None
 
+        for idx, dev in self._door_sensors.items():
+            try:
+                door_states[idx] = dev.read_state()
+            except Exception as exc:
+                logger.error("Door sensor %d read: %s", idx, exc)
+                door_states[idx] = None
+
+        for idx, dev in self._window_sensors.items():
+            try:
+                window_states[idx] = dev.read_state()
+            except Exception as exc:
+                logger.error("Window sensor %d read: %s", idx, exc)
+                window_states[idx] = None
+
+        for idx, dev in self._motion_sensors.items():
+            try:
+                motion_states[idx] = dev.read_state()
+            except Exception as exc:
+                logger.error("Motion sensor %d read: %s", idx, exc)
+                motion_states[idx] = None
+
+        for name, dev in self._appliances.items():
+            try:
+                appliance_states[name] = dev.read_state()
+            except Exception as exc:
+                logger.error("Appliance %s read: %s", name, exc)
+                appliance_states[name] = None
+
+        security_state = {}
+        if self._security:
+            try:
+                security_state = self._security.read_full_state()
+            except Exception as exc:
+                logger.error("Security read: %s", exc)
+
         return {
-            'mock':          self._client.mock,
-            'dali':          dali_levels,
-            'relays':        relay_states,
-            'switches':      switch_states,
+            'mock':        self._client.mock,
+            'apartment_id': self.apartment_id,
+            'dali':        dali_levels,
+            'relays':      relay_states,
+            'curtains':    curtain_states,
+            'switches':    switch_states,
+            'door_sensors':   door_states,
+            'window_sensors': window_states,
+            'motion_sensors': motion_states,
+            'appliances':  appliance_states,
+            'security':    security_state,
         }
 
-    # ── Singleton ─────────────────────────────────────────────────────────────
+    # ── Multi-tenant lookup ────────────────────────────────────────────────────
 
     @classmethod
-    def instance(cls) -> 'DeviceRegistry':
-        with cls._instance_lock:
-            if cls._instance is None:
-                inst = cls()
+    def for_apartment(cls, apt_id: int) -> 'DeviceRegistry':
+        """
+        Return (or lazily create) the registry for a specific apartment.
+
+        This is the only way to obtain a DeviceRegistry — apartment_id must
+        always come from the authenticated user's ApartmentMembership (see
+        views.py), never from client-supplied input, or one resident could
+        address another apartment's hardware.
+        """
+        with cls._apt_lock:
+            if apt_id not in cls._apt_instances:
+                inst = cls(apartment_id=apt_id)
                 inst._start()
-                cls._instance = inst
-            return cls._instance
+                cls._apt_instances[apt_id] = inst
+            return cls._apt_instances[apt_id]
+
+    @classmethod
+    def active_instances(cls) -> List['DeviceRegistry']:
+        """All apartment registries that have been used at least once in
+        this process — i.e. have an open (or attempted) ADS connection.
+        Used by the health monitor instead of eagerly connecting to every
+        apartment in the database on a schedule."""
+        with cls._apt_lock:
+            return list(cls._apt_instances.values())

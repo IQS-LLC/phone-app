@@ -4,6 +4,12 @@ asgiref==3.11.1
 # Django compatible with Python 3.11
 Django==5.2.12
 
+# Django REST Framework
+djangorestframework==3.16.0
+
+# JWT authentication
+djangorestframework-simplejwt==5.5.0
+
 # CORS handling
 django-cors-headers==4.9.0
 
@@ -26,9 +32,16 @@ tzdata==2025.3
 # Production WSGI server
 gunicorn==21.2.0
 
-# PostgreSQL driver
-psycopg>=3.1,<4.0
+# Celery — task queue for PLC polling, notifications, housekeeping
+celery[redis]==5.3.6
+django-celery-beat==2.9.0
+redis==5.0.8
 
+# PostgreSQL driver (binary extra bundles libpq — no system libpq needed)
+psycopg[binary]>=3.1,<4.0
 
 # Static files
 whitenoise==6.6.0
+
+# JWT token decoding (used by simplejwt)
+PyJWT>=2.8.0,<3.0

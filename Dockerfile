@@ -1,42 +1,51 @@
-# Multi-stage build for production
-FROM python:3.11-slim as base
+# =============================================================================
+# Lugh Django Backend — Multi-stage Production Dockerfile
+# =============================================================================
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    default-libmysqlclient-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+# ── Stage 1: Python dependencies ─────────────────────────────────────────────
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Dependencies stage
-FROM base as dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Production stage
-FROM base as production
-COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=dependencies /usr/local/bin /usr/local/bin
+# ── Stage 2: Production image ─────────────────────────────────────────────────
+FROM python:3.11-slim AS production
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash app \
-    && chown -R app:app /app
-USER app
+WORKDIR /app
 
-# Copy application code
-COPY --chown=app:app . .
+# Runtime dependencies only
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
 
-# Collect static files
-RUN python manage.py collectstatic --noinput
+# Copy installed Python packages from builder
+COPY --from=builder /install /usr/local
 
-# Expose port
+# Non-root application user
+RUN groupadd -r django && useradd -r -g django django
+RUN mkdir -p /app/staticfiles /app/media && chown -R django:django /app
+
+# Copy application source
+COPY --chown=django:django . .
+
+USER django
+
+# Gunicorn must use 1 worker due to in-memory DeviceRegistry.
+# Do NOT increase workers without first moving registry state to Redis/DB.
+ENV WEB_CONCURRENCY=1
+ENV DJANGO_SETTINGS_MODULE=PLC_Project.settings
+
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD python manage.py check || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/')" || exit 1
 
-# Run with gunicorn
 CMD ["gunicorn", "--config", "gunicorn.conf.py", "PLC_Project.wsgi:application"]
