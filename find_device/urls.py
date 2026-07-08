@@ -1,6 +1,7 @@
 from django.urls import path
-from . import views, auth_views, device_views, user_management_views
+from . import views, auth_views, device_views, user_management_views, map_views
 from .discovery import views as discovery_views
+from .realtime import views as realtime_views
 
 urlpatterns = [
     # ── Health / status ──────────────────────────────────────────────────────
@@ -99,4 +100,24 @@ apartment_management_urlpatterns = [
     path('<int:pk>/devices/',          user_management_views.apartment_devices,         name='apartments-mgmt-devices'),
     path('<int:pk>/devices/reorder/',  user_management_views.apartment_devices_reorder, name='apartments-mgmt-devices-reorder'),
     path('<int:pk>/devices/<int:device_id>/', user_management_views.apartment_device_detail, name='apartments-mgmt-device-detail'),
+]
+
+# Mounted at /realtime/ in PLC_Project/urls.py
+# JWT is passed as ?token=<access_token> (EventSource can't set headers)
+realtime_urlpatterns = [
+    path('<int:device_id>/stream/',   realtime_views.sse_stream,  name='realtime-sse-stream'),
+    path('<int:device_id>/snapshot/', realtime_views.snapshot,    name='realtime-snapshot'),
+]
+
+# Mounted at /map/ in PLC_Project/urls.py
+# GET  is authenticated-member accessible (resident reads published layout)
+# POST/PUT/DELETE require is_staff (Tech Team Map Editor)
+map_urlpatterns = [
+    path('apartments/',                                       map_views.apartment_list,   name='map-apartment-list'),
+    path('<int:apartment_id>/',                               map_views.layout,            name='map-layout'),
+    path('<int:apartment_id>/background/',                    map_views.background,        name='map-background'),
+    path('<int:apartment_id>/publish/',                       map_views.publish,           name='map-publish'),
+    path('<int:apartment_id>/versions/',                      map_views.version_list,      name='map-versions'),
+    path('<int:apartment_id>/versions/<int:version_id>/restore/', map_views.version_restore, name='map-version-restore'),
+    path('<int:apartment_id>/devices/',                       map_views.device_picker,     name='map-device-picker'),
 ]

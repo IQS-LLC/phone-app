@@ -467,3 +467,287 @@ class AuditLog(models.Model):
     def __str__(self) -> str:
         who = self.user.username if self.user else "anonymous"
         return f"[{self.created_at:%Y-%m-%d %H:%M}] {who} {self.action} ({self.result})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Digital Twin Map Editor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MapLayout(models.Model):
+    """
+    Canvas configuration for one apartment's Digital Twin floor plan.
+    Tech Team edits this; residents read the published state.
+    One layout per apartment — create on first editor open.
+    """
+
+    apartment      = models.OneToOneField(
+        Apartment, on_delete=models.CASCADE, related_name="map_layout",
+    )
+    canvas_width   = models.FloatField(default=2000)
+    canvas_height  = models.FloatField(default=1500)
+
+    # Background image (architectural drawing imported as locked tracing layer)
+    background_url    = models.CharField(max_length=500, blank=True)
+    background_x      = models.FloatField(default=0)
+    background_y      = models.FloatField(default=0)
+    background_width  = models.FloatField(default=2000)
+    background_height = models.FloatField(default=1500)
+    background_rotation = models.FloatField(default=0)
+    background_opacity  = models.FloatField(default=0.25)
+    background_locked   = models.BooleanField(default=True)
+    background_visible  = models.BooleanField(default=True)
+
+    is_published  = models.BooleanField(default=False)
+    published_at  = models.DateTimeField(null=True, blank=True)
+    created_by    = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="created_map_layouts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Map Layout"
+
+    def __str__(self) -> str:
+        return f"MapLayout({self.apartment.name})"
+
+
+class MapLayer(models.Model):
+    """Named layer for organising canvas objects (walls, lighting, sensors, …)."""
+
+    LAYER_BACKGROUND  = "background"
+    LAYER_WALLS       = "walls"
+    LAYER_FURNITURE   = "furniture"
+    LAYER_ELECTRICAL  = "electrical"
+    LAYER_LIGHTING    = "lighting"
+    LAYER_SENSORS     = "sensors"
+    LAYER_SECURITY    = "security"
+    LAYER_HVAC        = "hvac"
+    LAYER_ENERGY      = "energy"
+    LAYER_NETWORKING  = "networking"
+    LAYER_LABELS      = "labels"
+    LAYER_ANNOTATIONS = "annotations"
+    LAYER_CHOICES = [
+        (LAYER_BACKGROUND,  "Background"),
+        (LAYER_WALLS,       "Walls"),
+        (LAYER_FURNITURE,   "Furniture"),
+        (LAYER_ELECTRICAL,  "Electrical"),
+        (LAYER_LIGHTING,    "Lighting"),
+        (LAYER_SENSORS,     "Sensors"),
+        (LAYER_SECURITY,    "Security"),
+        (LAYER_HVAC,        "HVAC"),
+        (LAYER_ENERGY,      "Energy"),
+        (LAYER_NETWORKING,  "Networking"),
+        (LAYER_LABELS,      "Labels"),
+        (LAYER_ANNOTATIONS, "Annotations"),
+    ]
+
+    DEFAULT_LAYERS = [
+        ("Rooms",       LAYER_WALLS,       0),
+        ("Furniture",   LAYER_FURNITURE,   1),
+        ("Electrical",  LAYER_ELECTRICAL,  2),
+        ("Lighting",    LAYER_LIGHTING,    3),
+        ("Sensors",     LAYER_SENSORS,     4),
+        ("HVAC",        LAYER_HVAC,        5),
+        ("Security",    LAYER_SECURITY,    6),
+        ("Labels",      LAYER_LABELS,      7),
+        ("Annotations", LAYER_ANNOTATIONS, 8),
+    ]
+
+    layout     = models.ForeignKey(MapLayout, on_delete=models.CASCADE, related_name="layers")
+    name       = models.CharField(max_length=100)
+    layer_type = models.CharField(max_length=20, choices=LAYER_CHOICES, default=LAYER_LABELS)
+    visible    = models.BooleanField(default=True)
+    locked     = models.BooleanField(default=False)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.layout.apartment.name} / {self.name}"
+
+
+class CanvasObject(models.Model):
+    """
+    One interactive element on the canvas: a room, a device icon, a label, etc.
+    Linked to ApartmentDevice for live PLC control in resident mode.
+    """
+
+    TYPE_ROOM    = "room"
+    TYPE_DEVICE  = "device"
+    TYPE_LABEL   = "label"
+    TYPE_WALL    = "wall"
+    TYPE_OBJECT_CHOICES = [
+        (TYPE_ROOM,   "Room"),
+        (TYPE_DEVICE, "Device"),
+        (TYPE_LABEL,  "Label"),
+        (TYPE_WALL,   "Wall"),
+    ]
+
+    # Device sub-types (one per physical device category)
+    DEV_CEILING_LIGHT    = "ceiling_light"
+    DEV_PENDANT_LIGHT    = "pendant_light"
+    DEV_LED_STRIP        = "led_strip"
+    DEV_RELAY_LIGHT      = "relay_light"
+    DEV_CURTAIN          = "curtain"
+    DEV_BLIND            = "blind"
+    DEV_WINDOW           = "window"
+    DEV_DOOR             = "door"
+    DEV_DOOR_SENSOR      = "door_sensor"
+    DEV_WINDOW_SENSOR    = "window_sensor"
+    DEV_PRESENCE_SENSOR  = "presence_sensor"
+    DEV_SMOKE_DETECTOR   = "smoke_detector"
+    DEV_HEAT_DETECTOR    = "heat_detector"
+    DEV_LEAK_SENSOR      = "leak_sensor"
+    DEV_HVAC             = "hvac"
+    DEV_THERMOSTAT       = "thermostat"
+    DEV_TEMP_SENSOR      = "temperature_sensor"
+    DEV_HUMIDITY_SENSOR  = "humidity_sensor"
+    DEV_POWER_OUTLET     = "power_outlet"
+    DEV_USB_OUTLET       = "usb_outlet"
+    DEV_TV_OUTLET        = "tv_outlet"
+    DEV_RJ45_OUTLET      = "rj45_outlet"
+    DEV_GARAGE_DOOR      = "garage_door"
+    DEV_GATE             = "gate"
+    DEV_CAMERA           = "camera"
+    DEV_DOORBIRD         = "doorbird"
+    DEV_INTERCOM         = "intercom"
+    DEV_SPEAKER          = "speaker"
+    DEV_MICROPHONE       = "microphone"
+    DEV_ALARM            = "alarm"
+    DEV_WEATHER_STATION  = "weather_station"
+    DEV_SOLAR            = "solar"
+    DEV_BATTERY          = "battery"
+    DEV_EV_CHARGER       = "ev_charger"
+    DEV_GARDEN           = "garden"
+    DEV_POOL             = "pool"
+    DEV_CUSTOM           = "custom"
+    DEVICE_TYPE_CHOICES = [
+        (DEV_CEILING_LIGHT,   "Ceiling Light"),
+        (DEV_PENDANT_LIGHT,   "Pendant Light"),
+        (DEV_LED_STRIP,       "LED Strip"),
+        (DEV_RELAY_LIGHT,     "Relay Light"),
+        (DEV_CURTAIN,         "Curtain"),
+        (DEV_BLIND,           "Blind"),
+        (DEV_WINDOW,          "Window"),
+        (DEV_DOOR,            "Door"),
+        (DEV_DOOR_SENSOR,     "Door Sensor"),
+        (DEV_WINDOW_SENSOR,   "Window Sensor"),
+        (DEV_PRESENCE_SENSOR, "Presence Sensor"),
+        (DEV_SMOKE_DETECTOR,  "Smoke Detector"),
+        (DEV_HEAT_DETECTOR,   "Heat Detector"),
+        (DEV_LEAK_SENSOR,     "Leak Sensor"),
+        (DEV_HVAC,            "HVAC"),
+        (DEV_THERMOSTAT,      "Thermostat"),
+        (DEV_TEMP_SENSOR,     "Temperature Sensor"),
+        (DEV_HUMIDITY_SENSOR, "Humidity Sensor"),
+        (DEV_POWER_OUTLET,    "Power Outlet"),
+        (DEV_USB_OUTLET,      "USB Outlet"),
+        (DEV_TV_OUTLET,       "TV Outlet"),
+        (DEV_RJ45_OUTLET,     "RJ45 Outlet"),
+        (DEV_GARAGE_DOOR,     "Garage Door"),
+        (DEV_GATE,            "Gate"),
+        (DEV_CAMERA,          "Camera"),
+        (DEV_DOORBIRD,        "DoorBird"),
+        (DEV_INTERCOM,        "Intercom"),
+        (DEV_SPEAKER,         "Speaker"),
+        (DEV_MICROPHONE,      "Microphone"),
+        (DEV_ALARM,           "Alarm"),
+        (DEV_WEATHER_STATION, "Weather Station"),
+        (DEV_SOLAR,           "Solar"),
+        (DEV_BATTERY,         "Battery"),
+        (DEV_EV_CHARGER,      "EV Charger"),
+        (DEV_GARDEN,          "Garden"),
+        (DEV_POOL,            "Pool"),
+        (DEV_CUSTOM,          "Custom"),
+    ]
+
+    layout      = models.ForeignKey(MapLayout, on_delete=models.CASCADE, related_name="objects")
+    layer       = models.ForeignKey(
+        MapLayer, on_delete=models.SET_NULL, null=True, blank=True, related_name="objects",
+    )
+    object_type = models.CharField(max_length=10, choices=TYPE_OBJECT_CHOICES, default=TYPE_DEVICE)
+    device_type = models.CharField(max_length=30, choices=DEVICE_TYPE_CHOICES, blank=True)
+    name        = models.CharField(max_length=200)
+
+    # Canvas position + transform (in canvas units, not pixels)
+    x        = models.FloatField(default=100)
+    y        = models.FloatField(default=100)
+    width    = models.FloatField(default=48)
+    height   = models.FloatField(default=48)
+    rotation = models.FloatField(default=0)
+
+    # PLC linking — either a free-form ADS symbol path or a FK to ApartmentDevice
+    plc_variable    = models.CharField(max_length=255, blank=True)
+    apartment_device = models.ForeignKey(
+        ApartmentDevice, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="canvas_objects",
+    )
+    room = models.ForeignKey(
+        Room, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="canvas_objects",
+    )
+
+    # Visual customisation
+    color    = models.CharField(max_length=20, blank=True, help_text="Hex e.g. #FF5A3E")
+    label_visible = models.BooleanField(default=True)
+
+    # Grouping (objects with the same group_id can be moved/operated together)
+    group_id = models.CharField(max_length=50, blank=True)
+
+    # Flexible extra metadata (scene membership, HVAC zone, etc.)
+    properties = models.JSONField(default=dict, blank=True)
+
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.layout.apartment.name} / {self.name} ({self.object_type})"
+
+    def to_dict(self) -> dict:
+        return {
+            "id":               self.pk,
+            "layer_id":         self.layer_id,
+            "object_type":      self.object_type,
+            "device_type":      self.device_type,
+            "name":             self.name,
+            "x":                self.x,
+            "y":                self.y,
+            "width":            self.width,
+            "height":           self.height,
+            "rotation":         self.rotation,
+            "plc_variable":     self.plc_variable,
+            "apartment_device_id": self.apartment_device_id,
+            "room_id":          self.room_id,
+            "color":            self.color,
+            "label_visible":    self.label_visible,
+            "group_id":         self.group_id,
+            "properties":       self.properties,
+            "sort_order":       self.sort_order,
+        }
+
+
+class MapVersion(models.Model):
+    """Immutable snapshot of a MapLayout's objects at a point in time."""
+
+    layout         = models.ForeignKey(MapLayout, on_delete=models.CASCADE, related_name="versions")
+    version_number = models.PositiveIntegerField()
+    snapshot       = models.JSONField(help_text="Full serialized list of CanvasObject dicts")
+    created_by     = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    description    = models.CharField(max_length=255, blank=True)
+    is_published   = models.BooleanField(default=False)
+
+    class Meta:
+        ordering        = ["-version_number"]
+        unique_together = [("layout", "version_number")]
+
+    def __str__(self) -> str:
+        tag = " [published]" if self.is_published else ""
+        return f"{self.layout.apartment.name} v{self.version_number}{tag}"

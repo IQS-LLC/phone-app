@@ -9,6 +9,8 @@ from find_device.urls import (
     user_management_urlpatterns,
     permission_urlpatterns,
     apartment_management_urlpatterns,
+    realtime_urlpatterns,
+    map_urlpatterns,
 )
 
 
@@ -20,8 +22,11 @@ urlpatterns = [
     path('admin/',       admin.site.urls),
     path('health/',      health_check),
 
-    # ── PLC control (existing endpoints — no JWT by default) ─────────────────
+    # ── PLC control ───────────────────────────────────────────────────────────
     path('plc/',         include('find_device.urls')),
+
+    # ── Real-time SSE (live PLC variable push) ────────────────────────────────
+    path('realtime/',    include(realtime_urlpatterns)),
 
     # ── Authentication ────────────────────────────────────────────────────────
     path('auth/',        include(auth_urlpatterns)),
@@ -36,4 +41,8 @@ urlpatterns = [
     path('manage/users/',      include(user_management_urlpatterns)),
     path('manage/permissions/', include(permission_urlpatterns)),
     path('manage/apartments/', include(apartment_management_urlpatterns)),
+
+    # ── Digital Twin Map Editor ───────────────────────────────────────────────
+    # GET readable by apartment members; all writes require is_staff
+    path('map/',              include(map_urlpatterns)),
 ]

@@ -139,9 +139,45 @@ class _LoginScreenState extends State<LoginScreen>
                   ),
                   const SizedBox(height: 32),
                   Text(
-                    'Your account was created by your building administrator.',
+                    'Access is granted by your building administrator.',
                     style: AppText.caption,
                     textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 12),
+                  GestureDetector(
+                    onTap: () => showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        backgroundColor: C.card,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20)),
+                        title: Text('Request Access',
+                            style: AppText.h2.copyWith(fontSize: 17)),
+                        content: Text(
+                          'To get access to Lugh, contact your building manager or '
+                          'the IQS technical team. They will create your account '
+                          'and assign you to your apartment.',
+                          style: AppText.bodySm,
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: Text('Got it',
+                                style: AppText.bodySm.copyWith(
+                                    color: C.accent,
+                                    fontWeight: FontWeight.w700)),
+                          ),
+                        ],
+                      ),
+                    ),
+                    child: Text(
+                      'Need access? Contact your building manager',
+                      style: AppText.caption.copyWith(
+                          color: C.accent.withAlpha(180),
+                          decoration: TextDecoration.underline,
+                          decorationColor: C.accent.withAlpha(100)),
+                      textAlign: TextAlign.center,
+                    ),
                   ),
                   const SizedBox(height: 32),
                 ],

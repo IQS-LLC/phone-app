@@ -137,6 +137,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (widget.authState != null) ...[
             _sectionPad(_accountSection()),
           ],
+          // ── Apartment ────────────────────────────────────────────────────
+          if (widget.authState != null)
+            _sectionPad(_apartmentSection()),
           // ── Preferences ──────────────────────────────────────────────────
           if (widget.authState != null)
             _sectionPad(_preferencesSection()),
@@ -220,6 +223,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ]),
     ),
   ]);
+
+  // ── Apartment ────────────────────────────────────────────────────────────
+
+  Widget _apartmentSection() {
+    final name = widget.authState?.apartmentName;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SectionHeader('Apartment'),
+      const SizedBox(height: 12),
+      AppCard(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(
+                color: C.accent.withAlpha(18),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: C.accent.withAlpha(40), width: 0.5),
+              ),
+              child: const Icon(Icons.apartment_rounded, color: C.accent, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(name ?? 'Apartment', style: AppText.cardTitle),
+                Text('Your assigned residence', style: AppText.caption),
+              ]),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: C.green.withAlpha(18),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: C.green.withAlpha(50), width: 0.5),
+              ),
+              child: Text('ACTIVE',
+                  style: AppText.labelSm.copyWith(color: C.green)),
+            ),
+          ]),
+        ),
+      ),
+    ]);
+  }
 
   // ── Preferences ──────────────────────────────────────────────────────────
 
@@ -368,8 +414,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         final s = widget.appState;
         return AppCard(
           child: Column(children: [
-            _InfoRow(icon: Icons.link_rounded, label: 'Server', value: s.baseUrl, mono: true),
-            const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            if (widget.authState?.hasInstallerAccess == true ||
+                widget.authState?.user?.isStaff == true) ...[
+              _InfoRow(icon: Icons.link_rounded, label: 'Server', value: s.baseUrl, mono: true),
+              const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            ],
             _InfoRow(
               icon: Icons.wifi_rounded, label: 'Connection',
               value: s.connected ? 'Online' : 'Offline',

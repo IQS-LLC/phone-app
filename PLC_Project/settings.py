@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
+    "django_celery_beat",
     "find_device",
 ]
 
@@ -282,3 +283,54 @@ SIMPLE_JWT = {
 # local tooling that intentionally bypasses login (e.g. a curl smoke test).
 
 PLC_REQUIRE_AUTH = os.getenv("PLC_REQUIRE_AUTH", "True").lower() == "true"
+
+# ── Celery ────────────────────────────────────────────────────────────────────
+# Workers handle: PLC polling, alarm notifications, audit log archival,
+# scheduled energy reports, temporary-access expiry sweeps.
+
+CELERY_BROKER_URL          = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND      = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CELERY_ACCEPT_CONTENT      = ["json"]
+CELERY_TASK_SERIALIZER     = "json"
+CELERY_RESULT_SERIALIZER   = "json"
+CELERY_TIMEZONE            = TIME_ZONE
+CELERY_ENABLE_UTC          = True
+
+# Task routing — separate queues so heavy PLC polling doesn't block notifications
+CELERY_TASK_ROUTES = {
+    "find_device.tasks.poll_plc_state":        {"queue": "plc"},
+    "find_device.tasks.check_alarms":          {"queue": "alarms"},
+    "find_device.tasks.expire_temporary_access":{"queue": "housekeeping"},
+    "find_device.tasks.archive_audit_log":     {"queue": "housekeeping"},
+    "find_device.tasks.send_notification":     {"queue": "notifications"},
+}
+
+# Beat schedule — periodic tasks
+from celery.schedules import crontab  # noqa: E402
+
+CELERY_BEAT_SCHEDULE = {
+    # Poll every registered PLC device every 2 s
+    "poll-plc-state": {
+        "task":     "find_device.tasks.poll_plc_state",
+        "schedule": 2.0,
+        "options":  {"queue": "plc"},
+    },
+    # Alarm threshold check every 5 s
+    "check-alarms": {
+        "task":     "find_device.tasks.check_alarms",
+        "schedule": 5.0,
+        "options":  {"queue": "alarms"},
+    },
+    # Sweep expired temporary-access grants every minute
+    "expire-temporary-access": {
+        "task":     "find_device.tasks.expire_temporary_access",
+        "schedule": crontab(minute="*"),
+        "options":  {"queue": "housekeeping"},
+    },
+    # Archive audit log entries older than 90 days at 02:00 UTC daily
+    "archive-audit-log": {
+        "task":     "find_device.tasks.archive_audit_log",
+        "schedule": crontab(hour=2, minute=0),
+        "options":  {"queue": "housekeeping"},
+    },
+}

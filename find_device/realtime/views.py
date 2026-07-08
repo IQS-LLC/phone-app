@@ -32,7 +32,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from ..models import PLCDevice
+from ..models import ApartmentMembership, PLCDevice
 
 try:
     from .event_bus import EventBus
@@ -274,10 +274,13 @@ def sse_stream(request, device_id: int) -> StreamingHttpResponse:
             status=401,
         )
 
-    # ── Device ownership check ───────────────────────────────────────────────
+    # ── Device membership check ──────────────────────────────────────────────
+    # Never trust apartment_id from the client — derive it from the device.
+    # A user may only stream a device if they are a member of its apartment.
     try:
-        dev = PLCDevice.objects.get(pk=device_id, owner=user)
-    except PLCDevice.DoesNotExist:
+        dev = PLCDevice.objects.select_related("apartment").get(pk=device_id)
+        ApartmentMembership.objects.get(apartment=dev.apartment, user=user)
+    except (PLCDevice.DoesNotExist, ApartmentMembership.DoesNotExist):
         return JsonResponse(
             {"ok": False, "error": "Device not found", "code": "NOT_FOUND"},
             status=404,
@@ -357,7 +360,8 @@ def snapshot(request: Request, device_id: int) -> Response:
         }
       }
     """
-    dev = get_object_or_404(PLCDevice, pk=device_id, owner=request.user)
+    dev = get_object_or_404(PLCDevice.objects.select_related("apartment"), pk=device_id)
+    get_object_or_404(ApartmentMembership, apartment=dev.apartment, user=request.user)
 
     cache     = DeviceValueCache.instance()
     variables = cache.get_all(device_id)

@@ -1,0 +1,400 @@
+# =============================================================================
+# Lugh — Production CI/CD
+# =============================================================================
+#
+# Flow
+# ────
+#  push to main / AI-ed branch
+#    1. test          Django tests against real Postgres
+#    2. build         Django image → ghcr.io/shara-a/lugh-django:<sha>
+#    3. android       Signed release APK uploaded as artifact
+#    4. deploy        Helm upgrade on server (real PLC, no mock)
+#    5. verify        Health-check the live endpoint
+#
+#  push a tag  v*.*.*
+#    All of the above, PLUS:
+#    6. release       GitHub Release created; signed APK attached
+#
+# Required GitHub Secrets
+# ────────────────────────
+#  SERVER_HOST            IP of the production server        (192.168.0.192)
+#  SERVER_SSH_PORT        SSH port on that server            (usually 22)
+#  SERVER_SSH_USER        SSH username
+#  SERVER_SSH_KEY         SSH private key (PEM, begins -----BEGIN...)
+#  GHCR_PAT               GitHub PAT with packages:write scope
+#  DJANGO_SECRET_KEY      Django SECRET_KEY for production
+#  DB_PASSWORD            PostgreSQL password (shared for POSTGRES_PASSWORD + DB_PASSWORD)
+#  ANDROID_KEYSTORE_B64   base64-encoded release keystore (.jks)
+#  ANDROID_STORE_PASSWORD Keystore password
+#  ANDROID_KEY_ALIAS      Key alias inside the keystore
+#  ANDROID_KEY_PASSWORD   Key password
+#
+# One-time server setup (run once manually, then CI takes over)
+# ─────────────────────
+#  # Install k3s
+#  curl -sfL https://get.k3s.io | sh -
+#
+#  # Install Helm
+#  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+#
+#  # Create namespace + secrets (NEVER put real values in this file)
+#  kubectl create namespace lugh
+#  kubectl create secret generic lugh-secrets -n lugh \
+#    --from-literal=SECRET_KEY='<generate with python -c "import secrets; print(secrets.token_urlsafe(50))">' \
+#    --from-literal=DB_PASSWORD='<strong-password>' \
+#    --from-literal=POSTGRES_PASSWORD='<same-strong-password>' \
+#    --from-literal=INTERNAL_API_KEY='<random>'
+#
+#  # Add the Beckhoff AMS route (on the PLC side — TwinCAT System Manager)
+#  # Add a static route entry pointing to 192.168.0.192 (server IP)
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, AI-ed]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY:      ghcr.io
+  IMAGE_OWNER:   ${{ github.repository_owner }}
+  DJANGO_IMAGE:  ghcr.io/${{ github.repository_owner }}/lugh-django
+  # registry is ghcr.io/iqs-llc/lugh-django
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Tests
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  test:
+    name: Django Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB:       test_db
+          POSTGRES_USER:     test_user
+          POSTGRES_PASSWORD: test_pass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check migrations are up to date
+        env:
+          DJANGO_SETTINGS_MODULE: PLC_Project.settings
+          SECRET_KEY: ci-test-key
+          DB_ENGINE:   django.db.backends.postgresql
+          DB_NAME:     test_db
+          DB_USER:     test_user
+          DB_PASSWORD: test_pass
+          DB_HOST:     localhost
+          DB_PORT:     "5432"
+          PLC_MOCK:    "true"
+          DEBUG:       "true"
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run migrations + tests
+        env:
+          DJANGO_SETTINGS_MODULE: PLC_Project.settings
+          SECRET_KEY: ci-test-key
+          DB_ENGINE:   django.db.backends.postgresql
+          DB_NAME:     test_db
+          DB_USER:     test_user
+          DB_PASSWORD: test_pass
+          DB_HOST:     localhost
+          DB_PORT:     "5432"
+          PLC_MOCK:    "true"
+          DEBUG:       "true"
+        run: |
+          python manage.py migrate --noinput
+          python manage.py test --verbosity=2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Build & Push Django Docker image → GHCR
+# ─────────────────────────────────────────────────────────────────────────────
+  build-backend:
+    name: Build Django Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      image-sha: sha-${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DJANGO_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags:      ${{ steps.meta.outputs.tags }}
+          labels:    ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Build signed Android APK
+# ─────────────────────────────────────────────────────────────────────────────
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.x"
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: flutter_application_plc
+        run: flutter pub get
+
+      # Decode keystore + write key.properties
+      # Uses shell `if` on env vars — build.gradle.kts falls back to debug
+      # signing automatically when no keystore is present.
+      - name: Setup Android signing
+        env:
+          KEYSTORE_B64:   ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASS:  ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS:      ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS:       ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode \
+              > flutter_application_plc/android/lugh-release.jks
+            cat > flutter_application_plc/android/key.properties <<EOF
+          storeFile=lugh-release.jks
+          storePassword=$KEYSTORE_PASS
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASS
+          EOF
+            echo "Release signing configured"
+          else
+            echo "ANDROID_KEYSTORE_B64 not set — APK will use debug signing"
+          fi
+
+      - name: Build release APK
+        working-directory: flutter_application_plc
+        run: |
+          flutter build apk --release \
+            --build-name="${{ github.ref_name }}" \
+            --build-number="${{ github.run_number }}"
+
+      - name: Rename APK with version
+        run: |
+          VERSION="${{ github.ref_name }}"
+          cp flutter_application_plc/build/app/outputs/flutter-apk/app-release.apk \
+             lugh-android-${VERSION}-${{ github.run_number }}.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lugh-android-apk
+          path: lugh-android-*.apk
+          retention-days: 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Deploy to Synology NAS via Docker Compose over SSH
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-android]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${{ secrets.SERVER_SSH_PORT }}" \
+            "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Write/update .env on server
+        env:
+          HOST:        ${{ secrets.SERVER_HOST }}
+          PORT:        ${{ secrets.SERVER_SSH_PORT }}
+          USER:        ${{ secrets.SERVER_SSH_USER }}
+          SECRET_KEY:  ${{ secrets.DJANGO_SECRET_KEY }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -s <<EOF
+            set -e
+            sudo mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
+            printf 'SECRET_KEY=%s\nPOSTGRES_PASSWORD=%s\nDB_PASSWORD=%s\n' \
+              "${SECRET_KEY}" "${DB_PASSWORD}" "${DB_PASSWORD}" \
+              | sudo tee /volume1/docker/lugh/.env > /dev/null
+            sudo chmod 600 /volume1/docker/lugh/.env
+            echo ".env written"
+          EOF
+
+      - name: Copy compose file + nginx config to server
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          PORT: ${{ secrets.SERVER_SSH_PORT }}
+          USER: ${{ secrets.SERVER_SSH_USER }}
+        run: |
+          # Synology SSH blocks the SCP/SFTP subsystem — pipe files through stdin instead
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
+            "cat > /volume1/docker/lugh/docker-compose.prod.yml" \
+            < docker-compose.prod.yml
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
+            "cat > /volume1/docker/lugh/nginx.conf" \
+            < nginx/nginx.conf
+
+      - name: Pull new images + recreate app containers
+        env:
+          SHA_TAG: sha-${{ github.sha }}
+          HOST:    ${{ secrets.SERVER_HOST }}
+          PORT:    ${{ secrets.SERVER_SSH_PORT }}
+          USER:    ${{ secrets.SERVER_SSH_USER }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          DOCKER="/volume1/@appstore/ContainerManager/usr/bin/docker"
+          COMPOSE="$DOCKER compose -f /volume1/docker/lugh/docker-compose.prod.yml"
+
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" bash -s <<EOF
+            set -euo pipefail
+            DOCKER="/volume1/@appstore/ContainerManager/usr/bin/docker"
+            COMPOSE="\$DOCKER compose -f /volume1/docker/lugh/docker-compose.prod.yml"
+
+            # Ensure docker socket is accessible
+            sudo chmod 666 /var/run/docker.sock
+
+            echo "==> GHCR login"
+            echo "${GHCR_PAT}" | \$DOCKER login ghcr.io -u iqs-llc --password-stdin
+
+            echo "==> Pinning image tag to sha-${SHA_TAG}"
+            sudo sed -i "s|ghcr.io/iqs-llc/lugh-django:.*|ghcr.io/iqs-llc/lugh-django:sha-${SHA_TAG}|g" \
+              /volume1/docker/lugh/docker-compose.prod.yml
+
+            echo "==> Pulling images"
+            \$COMPOSE pull
+
+            echo "==> Starting / updating stack"
+            \$COMPOSE up -d --remove-orphans
+
+            echo "==> Waiting for Django to be healthy (up to 90s)"
+            for i in \$(seq 1 18); do
+              STATUS=\$(\$DOCKER inspect lugh_django --format '{{.State.Health.Status}}' 2>/dev/null || echo "missing")
+              echo "  [\$i/18] Django health: \$STATUS"
+              [ "\$STATUS" = "healthy" ] && break
+              [ \$i -eq 18 ] && echo "Timed out waiting for healthy" && \$COMPOSE logs django | tail -30 && exit 1
+              sleep 5
+            done
+
+            echo "==> Stack status"
+            \$COMPOSE ps
+
+            echo "==> Deploy complete"
+          EOF
+
+      - name: Health check
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
+          PORT: ${{ secrets.SERVER_SSH_PORT }}
+          USER: ${{ secrets.SERVER_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p "$PORT" "$USER@$HOST" \
+            "curl -sf http://localhost:9080/health/ && echo 'Health check PASSED'"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. GitHub Release (only on version tags  v*.*.*)
+# ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-android, deploy]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lugh-android-apk
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Lugh ${{ github.ref_name }}"
+          body: |
+            ## Lugh ${{ github.ref_name }}
+
+            ### What's included
+            - Signed Android APK (direct install, no Play Store needed)
+            - Backend deployed to production server at 192.168.0.192
+            - Connected to real Beckhoff TwinCAT PLC at 192.168.0.161
+
+            ### Install Android app
+            1. Download `lugh-android-*.apk` below
+            2. Transfer to Android device
+            3. Enable "Install from unknown sources" in Settings → Security
+            4. Tap the APK to install
+
+            ### Server
+            - API: `http://192.168.0.192:9080`
+            - Health: `http://192.168.0.192:9080/health/`
+          draft: false
+          prerelease: false
+          files: lugh-android-*.apk

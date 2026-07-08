@@ -1,9 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext for all traffic (development: local LAN + emulator gateway) -->
-    <base-config cleartextTrafficPermitted="true">
+    <!-- Production: HTTPS only, trust system CAs (includes Entrust roots)
+         plus user-installed CAs for enterprise/private Entrust PKI certificates. -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
+
+    <!-- Local network (development / on-premise LAN): allow HTTP while HTTPS
+         is being configured, and trust any CA installed on the device. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.0.192</domain>
+        <domain includeSubdomains="false">192.168.0.158</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </domain-config>
 </network-security-config>

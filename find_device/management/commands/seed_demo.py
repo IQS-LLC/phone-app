@@ -18,7 +18,8 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from find_device.models import (
-    Apartment, ApartmentMembership, PLCDevice, Role, TemporaryAccess,
+    Apartment, ApartmentMembership, ApartmentDevice, PLCDevice, Room,
+    Role, TemporaryAccess,
 )
 
 DEMO_PASSWORD = "Demo12345!"
@@ -100,6 +101,25 @@ class Command(BaseCommand):
                 is_active=True, is_default=True,
             ),
         )
+
+        # Curtain motors for Apartment 16 (channels 1–3)
+        apt16 = apartments["Apartment 16"]
+        curtain_layout = [
+            (1, "Living Room Curtain",  "Living Room"),
+            (2, "Bedroom 1 Curtain",    "Bedroom 1"),
+            (3, "Bedroom 2 Curtain",    "Bedroom 2"),
+        ]
+        for idx, dev_name, room_name in curtain_layout:
+            room = Room.objects.filter(apartment=apt16, name=room_name).first()
+            ApartmentDevice.objects.update_or_create(
+                apartment=apt16,
+                device_type=ApartmentDevice.TYPE_CURTAIN,
+                channel_or_index=idx,
+                defaults=dict(
+                    room=room, name=dev_name, sort_order=idx,
+                ),
+            )
+        self.stdout.write(self.style.SUCCESS("Seeded 3 curtain devices for Apartment 16"))
 
         # A scheduled, time-windowed example: cleaner with a 4-hour window
         # today, scoped to the Guest role's permission set.
