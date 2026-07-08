@@ -252,7 +252,7 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy to Production
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, synology]   # Runs on NAS — private IP reachable via LAN
     needs: [build-backend, build-android]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
