@@ -287,24 +287,19 @@ jobs:
 
       - name: Pull new image + recreate stack
         env:
-          SHA_TAG:  sha-${{ github.sha }}
           GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           COMPOSE_FILE=/volume1/docker/lugh/docker-compose.prod.yml
+          DJANGO_IMAGE=ghcr.io/iqs-llc/lugh-django:latest
 
-          # The runner container has docker CLI + the host socket mounted
           chmod 666 /var/run/docker.sock
 
           echo "==> GHCR login"
           echo "$GHCR_PAT" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-          echo "==> Pinning image tag to $SHA_TAG"
-          sed -i "s|ghcr.io/iqs-llc/lugh-django:.*|ghcr.io/iqs-llc/lugh-django:$SHA_TAG|g" \
-            "$COMPOSE_FILE"
-
-          echo "==> Pulling images"
-          docker compose -f "$COMPOSE_FILE" pull
+          echo "==> Pulling new django image"
+          docker pull "$DJANGO_IMAGE"
 
           echo "==> Starting / updating stack"
           docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
