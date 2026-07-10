@@ -33,7 +33,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import ApartmentMembership, SessionInfo, UserProfile
+from .models import Apartment, ApartmentMembership, SessionInfo, UserProfile
 from .permissions import log_action
 
 logger = logging.getLogger("lumina.auth")
@@ -468,3 +468,53 @@ def apartment_select(request: Request, pk: int) -> Response:
     membership.save()  # model.save() demotes any other default
     log_action(request, "apartment_select", apartment=membership.apartment)
     return _ok({"apartment_id": pk})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apartment rename — any member can rename their own apartment
+# ─────────────────────────────────────────────────────────────────────────────
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def apartment_rename(request: Request, pk: int) -> Response:
+    """
+    PATCH /auth/apartments/<pk>/rename/
+    Body: {"name": "New Name"}
+
+    Any authenticated member of the apartment can rename it — no staff
+    permission required. The user must have an active membership on the
+    apartment (temporary grants are also accepted).
+    """
+    try:
+        apartment = Apartment.objects.get(pk=pk)
+    except Apartment.DoesNotExist:
+        return _err("Apartment not found", "NOT_FOUND", 404)
+
+    # Verify caller is a member (permanent or temporary)
+    is_member = ApartmentMembership.objects.filter(
+        user=request.user, apartment=apartment,
+    ).exists()
+    if not is_member:
+        from django.utils import timezone
+        from .models import TemporaryAccess
+        now = timezone.now()
+        is_member = TemporaryAccess.objects.filter(
+            user=request.user, apartment=apartment,
+            revoked=False, starts_at__lte=now, expires_at__gte=now,
+        ).exists()
+    if not is_member:
+        return _err("You are not a member of this apartment", "FORBIDDEN", 403)
+
+    name = str(request.data.get("name", "")).strip()
+    if not name:
+        return _err("name is required", "INVALID_PARAM")
+    if len(name) > 100:
+        return _err("name must be 100 characters or fewer", "INVALID_PARAM")
+
+    old_name = apartment.name
+    apartment.name = name
+    apartment.save(update_fields=["name", "updated_at"])
+
+    log_action(request, "apartment_rename", apartment=apartment,
+               metadata={"old_name": old_name, "new_name": name})
+    return _ok({"apartment_id": apartment.pk, "name": apartment.name})

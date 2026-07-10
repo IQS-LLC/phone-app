@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     Apartment, ApartmentDevice, ApartmentMembership, AuditLog,
-    DiscoveryCache, PLCDevice, Permission, Role, Room, SessionInfo,
+    CanvasObject, DiscoveryCache, MapLayer, MapLayout, MapVersion,
+    PLCDevice, Permission, Role, Room, SessionInfo,
     TemporaryAccess, UserProfile,
 )
 
@@ -105,3 +106,46 @@ class DiscoveryCacheAdmin(admin.ModelAdmin):
     list_display  = ("device", "symbol_count", "scan_duration_ms", "scanned_at")
     search_fields = ("device__name",)
     readonly_fields = ("scanned_at", "symbol_count", "scan_duration_ms")
+
+
+# ── Map models ────────────────────────────────────────────────────────────────
+
+@admin.register(MapLayout)
+class MapLayoutAdmin(admin.ModelAdmin):
+    list_display   = ("apartment", "is_published", "canvas_width", "canvas_height", "published_at", "created_by", "updated_at")
+    list_filter    = ("is_published",)
+    search_fields  = ("apartment__name",)
+    readonly_fields = ("created_at", "updated_at", "published_at")
+    autocomplete_fields = ("apartment", "created_by")
+
+
+@admin.register(MapLayer)
+class MapLayerAdmin(admin.ModelAdmin):
+    list_display   = ("name", "layout", "layer_type", "visible", "locked", "sort_order")
+    list_filter    = ("layer_type", "visible", "locked")
+    search_fields  = ("name", "layout__apartment__name")
+    autocomplete_fields = ("layout",)
+
+
+@admin.register(CanvasObject)
+class CanvasObjectAdmin(admin.ModelAdmin):
+    list_display   = ("__str__", "object_type", "device_type", "layout", "room", "x", "y", "width", "height", "sort_order")
+    list_filter    = ("object_type", "device_type")
+    search_fields  = ("layout__apartment__name", "room__name", "plc_variable")
+    autocomplete_fields = ("layout", "layer", "apartment_device", "room")
+    readonly_fields = ("sort_order",)
+
+
+@admin.register(MapVersion)
+class MapVersionAdmin(admin.ModelAdmin):
+    list_display   = ("layout", "version_number", "is_published", "created_by", "created_at", "description")
+    list_filter    = ("is_published",)
+    search_fields  = ("layout__apartment__name", "description")
+    readonly_fields = ("version_number", "snapshot", "created_at")
+    autocomplete_fields = ("layout", "created_by")
+
+    def has_add_permission(self, request):
+        return False  # versions are created by publishing, never hand-crafted
+
+    def has_change_permission(self, request, obj=None):
+        return False  # immutable snapshots

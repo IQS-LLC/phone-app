@@ -42,6 +42,7 @@ class AuthState extends ChangeNotifier {
   // dashboard greeting copy ("Welcome home to <name>"), never for routing
   // PLC requests (the backend resolves that from the JWT, never the client).
   String? _apartmentName;
+  int?    _apartmentId;
 
   AuthStatus            get status             => _status;
   AuthUser?             get user               => _user;
@@ -53,6 +54,7 @@ class AuthState extends ChangeNotifier {
   PlcDeviceConfig?      get activeDevice       => _activeDevice;
   bool                  get hasInstallerAccess => _hasInstallerAccess;
   String?               get apartmentName      => _apartmentName;
+  int?                  get apartmentId        => _apartmentId;
   AuthService           get service            => _svc;
 
   // ── Authenticated request helper ────────────────────────────────────────
@@ -235,6 +237,7 @@ class AuthState extends ChangeNotifier {
         orElse: () => apartments.first,
       ) as Map<String, dynamic>;
       _apartmentName = byDefault['name'] as String?;
+      _apartmentId   = byDefault['id']   as int?;
     }
     notifyListeners();
   }
@@ -251,6 +254,20 @@ class AuthState extends ChangeNotifier {
     _user = AuthUser.fromJson(j['user'] as Map<String, dynamic>);
     notifyListeners();
     return true;
+  }
+
+  /// PATCH /auth/apartments/{id}/rename/ — any member can rename their apartment.
+  /// Returns null on success, an error string on failure.
+  Future<String?> renameApartment(int id, String name) async {
+    final resp = await _request(
+      'PATCH', '/auth/apartments/$id/rename/',
+      body: jsonEncode({'name': name}),
+    );
+    final err = _decodeError(resp, 'Could not rename apartment');
+    if (err != null) return err;
+    _apartmentName = name;
+    notifyListeners();
+    return null;
   }
 
   // ── Network discovery ──────────────────────────────────────────────────────

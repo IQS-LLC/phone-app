@@ -55,7 +55,10 @@ class _MainShellState extends State<MainShell> {
             ),
             LogScreen(appState: widget.appState),
             SettingsScreen(
-                appState: widget.appState, authState: widget.authState),
+              appState:        widget.appState,
+              authState:       widget.authState,
+              onOpenMapEditor: _isStaff ? _openEditor : null,
+            ),
           ],
         ),
         bottomNavigationBar: _NavBar(index: _index, onTap: _onTap),

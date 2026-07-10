@@ -20,10 +20,18 @@
 #  Usage:
 #    bash gogogo222.sh            # run every step
 #    bash gogogo222.sh --no-wait  # run steps 1-9, exit (skip CI wait)
-#    bash gogogo222.sh docker     # only step 2-5 (stack only)
-#    bash gogogo222.sh tunnel     # only step 6-7 (tunnel + secret)
-#    bash gogogo222.sh deploy     # only steps 8-11 (commit + CI + download)
+#    bash gogogo222.sh docker     # only steps 2-5 (stack only)
+#    bash gogogo222.sh tunnel     # only steps 6-7 (tunnel + secret)
+#    bash gogogo222.sh deploy     # only steps 8-11 (commit + CI + download + Helm)
 #    bash gogogo222.sh status     # show running containers + current tunnel URL
+#
+#  Helm (optional — skips gracefully when disabled or cluster offline):
+#    HELM_DEPLOY=true bash gogogo222.sh          # enable Helm deploy step
+#    HELM_RELEASE=lugh                           # Helm release name (default: lugh)
+#    HELM_NAMESPACE=lugh                         # k8s namespace  (default: lugh)
+#    HELM_CHART=infra/helm/lugh                  # chart path relative to project dir
+#    HELM_VALUES=infra/helm/lugh/values.prod.yaml  # optional extra values file
+#    HELM_WAIT_TIMEOUT=300                       # seconds to wait for rollout
 #
 #  Logs:
 #    Console: coloured, timestamped
@@ -85,7 +93,7 @@ WAIT_CI_APPEAR="${WAIT_CI_APPEAR:-90}"      # max wait for CI run to appear afte
 # [GLOBALS] Internal state — do not edit
 # ────────────────────────────────────────────────────────────────────────────────
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 SCRIPT_NAME="gogogo222"
 SCRIPT_START=$(date +%s)
 RUN_TS=$(date +%Y-%m-%d_%H-%M-%S)
@@ -808,6 +816,128 @@ step_download_artifacts() {
 }
 
 # ────────────────────────────────────────────────────────────────────────────────
+# HELM DEPLOY — upgrade the k3s / Kubernetes cluster if available
+#
+# Environment vars (all optional — step always skips gracefully when unset):
+#   HELM_DEPLOY=true         enable this step
+#   HELM_RELEASE=lugh        Helm release name (default: lugh)
+#   HELM_NAMESPACE=lugh      k8s namespace (default: lugh)
+#   HELM_CHART=infra/helm/lugh  path to chart directory (relative to PROJECT_DIR)
+#   HELM_VALUES=             path to extra values file (optional)
+#   KUBECONFIG               path to kubeconfig (default: ~/.kube/config)
+#   HELM_WAIT_TIMEOUT=300    seconds to wait for rollout (default: 300)
+# ────────────────────────────────────────────────────────────────────────────────
+
+step_helm_deploy() {
+    log_step "STEP HELM / KUBERNETES DEPLOY"
+
+    # ── Guard: opt-in only ──────────────────────────────────────────────────
+    if [ "${HELM_DEPLOY:-false}" != "true" ]; then
+        log "HELM_DEPLOY is not 'true' — skipping Helm deploy (Docker Compose mode)"
+        log_data "Set HELM_DEPLOY=true and ensure kubectl/helm are reachable to enable"
+        return 0
+    fi
+
+    # ── Guard: check required binaries ─────────────────────────────────────
+    local missing=false
+    if ! command -v helm &>/dev/null; then
+        log_warn "helm not found in PATH — cannot deploy"
+        missing=true
+    fi
+    if ! command -v kubectl &>/dev/null; then
+        log_warn "kubectl not found in PATH — cannot deploy"
+        missing=true
+    fi
+    if $missing; then
+        log_warn "Helm deploy skipped — install helm + kubectl and re-run with HELM_DEPLOY=true"
+        log_data "  helm:    https://helm.sh/docs/intro/install/"
+        log_data "  kubectl: https://kubernetes.io/docs/tasks/tools/"
+        return 0
+    fi
+
+    # ── Config ─────────────────────────────────────────────────────────────
+    local release="${HELM_RELEASE:-lugh}"
+    local namespace="${HELM_NAMESPACE:-lugh}"
+    local chart="${HELM_CHART:-infra/helm/lugh}"
+    local values_file="${HELM_VALUES:-}"
+    local timeout="${HELM_WAIT_TIMEOUT:-300}"
+
+    log_data "Release   : ${release}"
+    log_data "Namespace : ${namespace}"
+    log_data "Chart     : ${PROJECT_DIR}/${chart}"
+    log_data "Timeout   : ${timeout}s"
+
+    # ── Guard: chart must exist ─────────────────────────────────────────────
+    local chart_path="${PROJECT_DIR}/${chart}"
+    if [ ! -f "${chart_path}/Chart.yaml" ]; then
+        log_warn "Chart not found at ${chart_path}/Chart.yaml — skipping"
+        return 0
+    fi
+
+    # ── Guard: cluster must be reachable ────────────────────────────────────
+    if ! kubectl cluster-info &>/dev/null; then
+        log_warn "kubectl cannot reach cluster — k3s offline or KUBECONFIG not set"
+        log_data "When NAS k3s is back: export KUBECONFIG=/path/to/config and re-run"
+        return 0
+    fi
+
+    # ── Ensure namespace exists ─────────────────────────────────────────────
+    log "Ensuring namespace '${namespace}' exists..."
+    kubectl get namespace "$namespace" &>/dev/null \
+        || kubectl create namespace "$namespace"
+
+    # ── Build helm upgrade command ──────────────────────────────────────────
+    local cmd=(
+        helm upgrade --install "$release" "$chart_path"
+        --namespace "$namespace"
+        --create-namespace
+        --wait
+        --timeout "${timeout}s"
+        --atomic
+        --cleanup-on-fail
+    )
+
+    # Image tag: use the git SHA that was just pushed (matches CI build tag)
+    local image_tag
+    image_tag="sha-$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || echo 'latest')"
+    cmd+=(--set "image.tag=${image_tag}")
+
+    # Server URL from tunnel (if available)
+    if [ -n "$TUNNEL_URL" ]; then
+        cmd+=(--set "env.LUGH_SERVER_URL=${TUNNEL_URL}")
+    fi
+
+    # Extra values file (e.g. infra/helm/lugh/values.prod.yaml)
+    if [ -n "$values_file" ] && [ -f "$values_file" ]; then
+        cmd+=(-f "$values_file")
+        log_data "Extra values: ${values_file}"
+    fi
+
+    log "Running: ${cmd[*]}"
+    printf '%s\n' "${cmd[*]}" >> "$LOG_FILE"
+
+    if "${cmd[@]}" 2>&1 | tee -a "$LOG_FILE"; then
+        log_ok "Helm deploy succeeded — release '${release}' in namespace '${namespace}'"
+
+        # Show rollout status
+        log "Rollout status:"
+        kubectl rollout status deployment/"${release}-django" \
+            -n "$namespace" --timeout="${timeout}s" 2>&1 | tee -a "$LOG_FILE" || true
+
+        # Show pods
+        log "Pods in '${namespace}':"
+        kubectl get pods -n "$namespace" 2>&1 | tee -a "$LOG_FILE"
+    else
+        log_error "Helm deploy FAILED — see log for details"
+        log "Helm history:"
+        helm history "$release" -n "$namespace" 2>&1 | tee -a "$LOG_FILE" || true
+        log "Pod events:"
+        kubectl get events -n "$namespace" --sort-by='.lastTimestamp' 2>&1 | tail -20 | tee -a "$LOG_FILE" || true
+        log_warn "Stack still running via Docker Compose — Helm failure is non-fatal"
+    fi
+}
+
+# ────────────────────────────────────────────────────────────────────────────────
 # STATUS — show current state without changing anything
 # ────────────────────────────────────────────────────────────────────────────────
 
@@ -912,6 +1042,7 @@ main() {
             step_check_deps
             step_commit_push
             step_wait_ci && step_download_artifacts || true
+            step_helm_deploy
             print_summary
             ;;
         status)
@@ -935,6 +1066,7 @@ main() {
                 log_warn "--no-wait: skipping CI monitoring"
                 log "Watch CI at: https://github.com/${GITHUB_REPO}/actions"
             fi
+            step_helm_deploy
             print_summary
             ;;
 

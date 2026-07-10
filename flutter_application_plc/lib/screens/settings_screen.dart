@@ -11,9 +11,10 @@ import 'user_management_screen.dart';
 import 'apartment_management_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
-  final AppState  appState;
-  final AuthState? authState;
-  const SettingsScreen({super.key, required this.appState, this.authState});
+  final AppState    appState;
+  final AuthState?  authState;
+  final VoidCallback? onOpenMapEditor;
+  const SettingsScreen({super.key, required this.appState, this.authState, this.onOpenMapEditor});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -24,6 +25,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _savingPush  = false;
   bool _savingUrl   = false;
   bool _testingConn = false;
+  bool _renaming    = false;
   late final TextEditingController _urlCtrl;
 
   @override
@@ -226,6 +228,109 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Apartment ────────────────────────────────────────────────────────────
 
+  Future<void> _showRenameSheet() async {
+    final auth = widget.authState;
+    final id   = auth?.apartmentId;
+    if (auth == null || id == null) return;
+
+    final ctrl = TextEditingController(text: auth.apartmentName ?? '');
+    String? error;
+
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: C.card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            24, 20, 24,
+            MediaQuery.of(ctx).viewInsets.bottom + 32,
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const BottomSheetHandle(),
+            const SizedBox(height: 20),
+            Container(
+              width: 48, height: 48,
+              decoration: BoxDecoration(
+                color: C.accent.withAlpha(18), shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.edit_rounded, color: C.accent, size: 22),
+            ),
+            const SizedBox(height: 14),
+            Text('Rename Apartment', style: AppText.h2),
+            const SizedBox(height: 6),
+            Text('All members will see the new name.',
+                style: AppText.bodySm, textAlign: TextAlign.center),
+            const SizedBox(height: 24),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              style: AppText.bodyMed,
+              decoration: InputDecoration(
+                hintText: 'e.g. Penthouse Suite',
+                hintStyle: AppText.bodySm.copyWith(color: C.textTri),
+                errorText: error,
+                filled: true, fillColor: C.elevated,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.border, width: 0.5),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.border, width: 0.5),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: C.accent, width: 1.5),
+                ),
+              ),
+              onSubmitted: (_) async {
+                final name = ctrl.text.trim();
+                if (name.isEmpty) {
+                  setSheet(() => error = 'Name cannot be empty');
+                  return;
+                }
+                setSheet(() => error = null);
+                final err = await auth.renameApartment(id, name);
+                if (err != null) {
+                  setSheet(() => error = err);
+                } else if (ctx.mounted) {
+                  Navigator.pop(ctx, true);
+                }
+              },
+            ),
+            const SizedBox(height: 16),
+            PrimaryButton(
+              label: 'Save Name',
+              onTap: () async {
+                final name = ctrl.text.trim();
+                if (name.isEmpty) {
+                  setSheet(() => error = 'Name cannot be empty');
+                  return;
+                }
+                setSheet(() => error = null);
+                final err = await auth.renameApartment(id, name);
+                if (err != null) {
+                  setSheet(() => error = err);
+                } else if (ctx.mounted) {
+                  Navigator.pop(ctx, true);
+                }
+              },
+            ),
+          ]),
+        ),
+      ),
+    );
+
+    ctrl.dispose();
+    if (saved == true && mounted) setState(() {});
+  }
+
   Widget _apartmentSection() {
     final name = widget.authState?.apartmentName;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -251,16 +356,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 Text('Your assigned residence', style: AppText.caption),
               ]),
             ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: C.green.withAlpha(18),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: C.green.withAlpha(50), width: 0.5),
+            if (_renaming)
+              const SizedBox(
+                width: 18, height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2, color: C.accent),
+              )
+            else ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: C.green.withAlpha(18),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: C.green.withAlpha(50), width: 0.5),
+                ),
+                child: Text('ACTIVE', style: AppText.labelSm.copyWith(color: C.green)),
               ),
-              child: Text('ACTIVE',
-                  style: AppText.labelSm.copyWith(color: C.green)),
-            ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: _showRenameSheet,
+                child: Container(
+                  width: 32, height: 32,
+                  decoration: BoxDecoration(
+                    color: C.elevated,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: C.border, width: 0.5),
+                  ),
+                  child: const Icon(Icons.edit_rounded, size: 15, color: C.textSec),
+                ),
+              ),
+            ],
           ]),
         ),
       ),
@@ -384,6 +508,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             builder: (_) => ApartmentManagementScreen(authState: widget.authState!),
           )),
         ),
+        if (widget.onOpenMapEditor != null) ...[
+          const Divider(height: 0.5, thickness: 0.5, color: C.border),
+          _SettingsNavRow(
+            icon: Icons.map_rounded, iconColor: C.teal,
+            label: 'Map Editor', sub: 'Create and edit floor-plan zones for any apartment',
+            onTap: widget.onOpenMapEditor!,
+          ),
+        ],
       ]),
     ),
   ]);

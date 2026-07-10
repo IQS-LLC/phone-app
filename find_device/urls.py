@@ -48,9 +48,10 @@ auth_urlpatterns = [
     path('sessions/<int:pk>/revoke/', auth_views.session_revoke,  name='auth-session-revoke'),
     path('sessions/revoke-all/',  auth_views.session_revoke_all,  name='auth-session-revoke-all'),
 
-    # Apartment selection
-    path('apartments/',               auth_views.apartment_list,   name='auth-apartments'),
-    path('apartments/<int:pk>/select/', auth_views.apartment_select, name='auth-apartment-select'),
+    # Apartment selection + rename
+    path('apartments/',                  auth_views.apartment_list,   name='auth-apartments'),
+    path('apartments/<int:pk>/select/',  auth_views.apartment_select, name='auth-apartment-select'),
+    path('apartments/<int:pk>/rename/',  auth_views.apartment_rename, name='auth-apartment-rename'),
 ]
 
 # Mounted at /manage/devices/ in PLC_Project/urls.py
