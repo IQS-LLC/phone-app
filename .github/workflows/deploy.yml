@@ -231,6 +231,7 @@ jobs:
         working-directory: flutter_application_plc
         run: |
           flutter build apk --release \
+            --dart-define="LUGH_SERVER_URL=${{ secrets.LUGH_SERVER_URL }}" \
             --build-name="${{ github.ref_name }}" \
             --build-number="${{ github.run_number }}"
 
@@ -248,14 +249,58 @@ jobs:
           retention-days: 30
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Deploy — runs directly on Synology NAS via self-hosted runner
+# 4. Build iOS IPA (macOS runner — Xcode required)
+# ─────────────────────────────────────────────────────────────────────────────
+  build-ios:
+    name: Build iOS IPA
+    runs-on: macos-latest
+    needs: test
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.x"
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: flutter_application_plc
+        run: flutter pub get
+
+      - name: Build iOS (no-codesign — works without Apple dev account)
+        working-directory: flutter_application_plc
+        run: |
+          flutter build ios --release --no-codesign \
+            --dart-define="LUGH_SERVER_URL=${{ secrets.LUGH_SERVER_URL }}" \
+            --build-name="${{ github.ref_name }}" \
+            --build-number="${{ github.run_number }}"
+
+      - name: Package as IPA
+        run: |
+          mkdir -p Payload
+          cp -r flutter_application_plc/build/ios/iphoneos/Runner.app Payload/
+          zip -r lugh-ios-${{ github.ref_name }}-${{ github.run_number }}.ipa Payload/
+          rm -rf Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lugh-ios-ipa
+          path: lugh-ios-*.ipa
+          retention-days: 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Deploy — runs directly on Synology NAS via self-hosted runner
 #    Runner container has /volume1/docker/lugh and /var/run/docker.sock mounted.
 #    No SSH needed — we ARE the server.
 # ─────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy to Production
     runs-on: [self-hosted, synology]
-    needs: [build-backend, build-android]
+    needs: [build-backend, build-android, build-ios]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
     permissions:
@@ -318,8 +363,11 @@ jobs:
           echo "==> Deploy complete"
 
       - name: Health check
+        env:
+          HOST: ${{ secrets.SERVER_HOST }}
         run: |
-          curl -sf http://localhost:9080/health/ && echo 'Health check PASSED'
+          # Runner is inside Docker — reach the host via its LAN IP, not localhost
+          curl -sf "http://$HOST:9080/health/" && echo 'Health check PASSED'
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. GitHub Release (only on version tags  v*.*.*)
