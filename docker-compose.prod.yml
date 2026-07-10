@@ -1,18 +1,25 @@
 # =============================================================================
-# Lugh — Production stack for Synology NAS (192.168.0.192)
+# Lugh — Production stack (any Linux server or NAS)
 #
-# Access: http://192.168.0.192:9080  (port 80/443 used by Synology DSM)
+# Image source: public Docker Hub — docker.io/<DOCKERHUB_USERNAME>/lugh-django
+# No registry login needed to pull. CI pushes :latest on every main push.
 #
-# Manual first-time server setup (CI handles subsequent deploys):
-#   sudo mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
-#   sudo cat > /volume1/docker/lugh/.env <<'EOF'
+# Required env vars (set in .env file next to this file):
+#   DOCKERHUB_USERNAME=<your docker hub handle>
+#   SECRET_KEY=<django secret key>
+#   POSTGRES_PASSWORD=<db password>
+#
+# NAS first-time setup:
+#   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
+#   cp docker-compose.prod.yml /volume1/docker/lugh/
+#   cat > /volume1/docker/lugh/.env <<'EOF'
+#   DOCKERHUB_USERNAME=yourhandle
 #   SECRET_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(50))">
 #   POSTGRES_PASSWORD=<strong-password>
 #   EOF
-#   sudo chmod 600 /volume1/docker/lugh/.env
+#   chmod 600 /volume1/docker/lugh/.env
+#   docker compose -f /volume1/docker/lugh/docker-compose.prod.yml up -d
 # =============================================================================
-
-version: "3.8"
 
 x-django-env: &django-env
   env_file: /volume1/docker/lugh/.env
@@ -68,7 +75,7 @@ services:
       retries:  10
 
   django:
-    image: ghcr.io/iqs-llc/lugh-django:latest
+    image: ${DOCKERHUB_USERNAME}/lugh-django:latest
     container_name: lugh_django
     restart: unless-stopped
     <<: *django-env
@@ -96,7 +103,7 @@ services:
       retries:  5
 
   celery-worker:
-    image: ghcr.io/iqs-llc/lugh-django:latest
+    image: ${DOCKERHUB_USERNAME}/lugh-django:latest
     container_name: lugh_celery_worker
     restart: unless-stopped
     <<: *django-env
@@ -116,7 +123,7 @@ services:
       disable: true
 
   celery-beat:
-    image: ghcr.io/iqs-llc/lugh-django:latest
+    image: ${DOCKERHUB_USERNAME}/lugh-django:latest
     container_name: lugh_celery_beat
     restart: unless-stopped
     <<: *django-env

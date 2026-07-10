@@ -6,28 +6,35 @@
 # ────
 #  push to main / AI-ed branch
 #    1. test          Django tests against real Postgres
-#    2. build         Django image → ghcr.io/shara-a/lugh-django:<sha>
+#    2. build         Django image → docker.io/<DOCKERHUB_USERNAME>/lugh-django
 #    3. android       Signed release APK uploaded as artifact
-#    4. deploy        Helm upgrade on server (real PLC, no mock)
-#    5. verify        Health-check the live endpoint
+#    4. ios           Unsigned IPA uploaded as artifact (sideload via AltStore/Sideloadly)
+#    5. deploy        Pull + restart on NAS (when DEPLOY_ENABLED=true)
 #
 #  push a tag  v*.*.*
 #    All of the above, PLUS:
-#    6. release       GitHub Release created; signed APK attached
+#    6. release       GitHub Release created; APK + IPA attached
 #
 # Required GitHub Secrets
 # ────────────────────────
-#  SERVER_HOST            IP of the production server        (192.168.0.192)
-#  SERVER_SSH_PORT        SSH port on that server            (usually 22)
-#  SERVER_SSH_USER        SSH username
-#  SERVER_SSH_KEY         SSH private key (PEM, begins -----BEGIN...)
-#  GHCR_PAT               GitHub PAT with packages:write scope
+#  DOCKERHUB_USERNAME     Your Docker Hub handle (e.g. shara-a)
+#  DOCKERHUB_TOKEN        Docker Hub access token (Settings → Security → New Token)
+#  LUGH_SERVER_URL        Set automatically by gogogo222.ps1 each run
 #  DJANGO_SECRET_KEY      Django SECRET_KEY for production
-#  DB_PASSWORD            PostgreSQL password (shared for POSTGRES_PASSWORD + DB_PASSWORD)
+#  DB_PASSWORD            PostgreSQL password
 #  ANDROID_KEYSTORE_B64   base64-encoded release keystore (.jks)
 #  ANDROID_STORE_PASSWORD Keystore password
 #  ANDROID_KEY_ALIAS      Key alias inside the keystore
 #  ANDROID_KEY_PASSWORD   Key password
+#
+# One-time Docker Hub setup
+# ──────────────────────────
+#  1. hub.docker.com → Create Repository
+#     Name: lugh-django   Visibility: Public   → Create
+#  2. hub.docker.com → Account Settings → Security → New Access Token
+#     Name: github-actions   Permissions: Read & Write
+#     Copy the token → add as DOCKERHUB_TOKEN secret in GitHub
+#  3. Add DOCKERHUB_USERNAME secret = your Docker Hub handle
 #
 # One-time server setup (run once manually, then CI takes over)
 # ─────────────────────
@@ -59,10 +66,7 @@ on:
     branches: [main]
 
 env:
-  REGISTRY:      ghcr.io
-  IMAGE_OWNER:   ${{ github.repository_owner }}
-  DJANGO_IMAGE:  ghcr.io/${{ github.repository_owner }}/lugh-django
-  # registry is ghcr.io/iqs-llc/lugh-django
+  DJANGO_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/lugh-django
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Tests
@@ -148,9 +152,9 @@ jobs:
 
       - uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - uses: docker/setup-buildx-action@v4
 
@@ -340,18 +344,15 @@ jobs:
 
       - name: Pull new image + recreate stack
         env:
-          GHCR_PAT: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           set -euo pipefail
           COMPOSE_FILE=/volume1/docker/lugh/docker-compose.prod.yml
-          DJANGO_IMAGE=ghcr.io/iqs-llc/lugh-django:latest
+          DJANGO_IMAGE="${DOCKERHUB_USERNAME}/lugh-django:latest"
 
           chmod 666 /var/run/docker.sock
 
-          echo "==> GHCR login"
-          echo "$GHCR_PAT" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-          echo "==> Pulling new django image"
+          echo "==> Pulling new django image (public Docker Hub — no login needed)"
           docker pull "$DJANGO_IMAGE"
 
           echo "==> Starting / updating stack"
