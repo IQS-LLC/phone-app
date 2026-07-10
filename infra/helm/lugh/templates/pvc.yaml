@@ -1,0 +1,28 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lugh-static
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.django.staticVolume.size }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lugh-media
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

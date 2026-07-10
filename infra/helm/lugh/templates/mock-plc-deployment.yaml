@@ -1,0 +1,52 @@
+{{- if .Values.mockPlc.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-plc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-plc
+spec:
+  replicas: {{ .Values.mockPlc.replicas }}
+  selector:
+    matchLabels:
+      app: lugh-mock-plc
+  template:
+    metadata:
+      labels:
+        app: lugh-mock-plc
+        {{- include "lugh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mock-plc
+    spec:
+      containers:
+        - name: mock-plc
+          image: {{ include "lugh.image" (merge (dict "repository" .Values.mockPlc.image.repository "tag" .Values.global.imageTag) .) }}
+          imagePullPolicy: {{ .Values.mockPlc.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.mockPlc.adsPort }}
+              name: ads
+              protocol: TCP
+            - containerPort: {{ .Values.mockPlc.httpPort }}
+              name: http
+          env:
+            - name: ADS_PORT
+              value: {{ .Values.mockPlc.adsPort | quote }}
+            - name: HTTP_PORT
+              value: {{ .Values.mockPlc.httpPort | quote }}
+            - name: DALI_CHANNELS
+              value: {{ .Values.mockPlc.daliChannels | quote }}
+            - name: RELAY_CHANNELS
+              value: {{ .Values.mockPlc.relayChannels | quote }}
+          resources:
+            {{- toYaml .Values.mockPlc.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.mockPlc.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.mockPlc.httpPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      restartPolicy: Always
+{{- end }}

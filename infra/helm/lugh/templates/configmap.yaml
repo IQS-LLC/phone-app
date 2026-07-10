@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lugh-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+data:
+  # Django settings
+  DEBUG: {{ .Values.django.env.DEBUG | quote }}
+  DJANGO_SETTINGS_MODULE: {{ .Values.django.env.DJANGO_SETTINGS_MODULE | quote }}
+  EXTRA_ALLOWED_HOSTS: {{ .Values.django.env.EXTRA_ALLOWED_HOSTS | quote }}
+
+  # PLC configuration
+  PLC_MOCK: {{ .Values.django.env.PLC_MOCK | quote }}
+  PLC_NETID: {{ .Values.django.env.PLC_NETID | quote }}
+  PLC_IP: {{ .Values.django.env.PLC_IP | quote }}
+  PLC_PORT: {{ .Values.django.env.PLC_PORT | quote }}
+
+  # Redis
+  REDIS_URL: {{ .Values.django.env.REDIS_URL | quote }}
+
+  # Database — must set ENGINE explicitly; settings.py defaults to sqlite3 without it
+  DB_ENGINE: "django.db.backends.postgresql"
+  DB_NAME: {{ .Values.postgres.database | quote }}
+  DB_USER: {{ .Values.postgres.user | quote }}
+  DB_HOST: "postgres"
+  DB_PORT: {{ .Values.postgres.port | quote }}
+
+  # Gunicorn
+  WEB_CONCURRENCY: "1"
+
+  # Security
+  SECURE_SSL_REDIRECT: "false"
+  SESSION_COOKIE_SECURE: "false"
+  CSRF_COOKIE_SECURE: "false"

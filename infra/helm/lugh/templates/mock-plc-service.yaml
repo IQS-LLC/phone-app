@@ -1,0 +1,21 @@
+{{- if .Values.mockPlc.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-plc
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-plc
+spec:
+  selector:
+    app: lugh-mock-plc
+  ports:
+    - port: {{ .Values.mockPlc.adsPort }}
+      targetPort: {{ .Values.mockPlc.adsPort }}
+      name: ads
+      protocol: TCP
+    - port: {{ .Values.mockPlc.httpPort }}
+      targetPort: {{ .Values.mockPlc.httpPort }}
+      name: http
+{{- end }}

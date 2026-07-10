@@ -1,0 +1,103 @@
+{{- if .Values.django.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: django
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  # NOTE: Django DeviceRegistry keeps state in memory.
+  # Keep replicas at 1 until the registry is backed by Redis/DB.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lugh-django
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: lugh-django
+        {{- include "lugh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: django
+      annotations:
+        # Force pod restart when config changes
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      initContainers:
+        # Wait for PostgreSQL to be ready before starting Django
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command: ['sh', '-c',
+            'until nc -z postgres {{ .Values.postgres.port }}; do echo "waiting for postgres"; sleep 2; done']
+        # Run Django migrations
+        - name: migrate
+          image: {{ include "lugh.image" (merge (dict "repository" .Values.django.image.repository "tag" .Values.django.image.tag) .) }}
+          imagePullPolicy: {{ .Values.django.image.pullPolicy }}
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          envFrom:
+            - configMapRef:
+                name: lugh-config
+            - secretRef:
+                name: lugh-secrets
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lugh-secrets
+                  key: DB_PASSWORD
+      containers:
+        - name: django
+          image: {{ include "lugh.image" (merge (dict "repository" .Values.django.image.repository "tag" .Values.django.image.tag) .) }}
+          imagePullPolicy: {{ .Values.django.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.django.port }}
+              name: http
+          command:
+            - gunicorn
+            - --config
+            - gunicorn.conf.py
+            - PLC_Project.wsgi:application
+          envFrom:
+            - configMapRef:
+                name: lugh-config
+            - secretRef:
+                name: lugh-secrets
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lugh-secrets
+                  key: DB_PASSWORD
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lugh-secrets
+                  key: SECRET_KEY
+          volumeMounts:
+            - name: static-files
+              mountPath: /app/staticfiles
+            - name: media-files
+              mountPath: /app/media
+          resources:
+            {{- toYaml .Values.django.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.django.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.django.readinessProbe | nindent 12 }}
+      volumes:
+        - name: static-files
+          persistentVolumeClaim:
+            claimName: lugh-static
+        - name: media-files
+          persistentVolumeClaim:
+            claimName: lugh-media
+      restartPolicy: Always
+{{- end }}

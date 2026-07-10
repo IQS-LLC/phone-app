@@ -1,0 +1,17 @@
+{{- if .Values.django.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: django
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: django
+spec:
+  selector:
+    app: lugh-django
+  ports:
+    - port: {{ .Values.django.port }}
+      targetPort: {{ .Values.django.port }}
+      name: http
+{{- end }}

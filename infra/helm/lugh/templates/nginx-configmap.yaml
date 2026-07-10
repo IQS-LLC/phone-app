@@ -1,0 +1,58 @@
+{{- if .Values.nginx.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lugh-nginx-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+data:
+  nginx.conf: |
+    upstream django_backend {
+        server django:{{ .Values.django.port }};
+        keepalive 32;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+        client_max_body_size 20M;
+
+        # Health check endpoint (for K8s probes — no upstream needed)
+        location = /health {
+            access_log off;
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+
+        # Static files
+        location /static/ {
+            alias /app/staticfiles/;
+            expires 30d;
+            add_header Cache-Control "public, max-age=2592000";
+            access_log off;
+        }
+
+        # Media files
+        location /media/ {
+            alias /app/media/;
+            expires 7d;
+            access_log off;
+        }
+
+        # All other requests → Django
+        location / {
+            proxy_pass http://django_backend;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_connect_timeout 60s;
+            proxy_read_timeout    120s;
+            proxy_send_timeout    120s;
+        }
+    }
+{{- end }}

@@ -1,0 +1,65 @@
+{{- if .Values.nginx.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nginx
+spec:
+  replicas: {{ .Values.nginx.replicas }}
+  selector:
+    matchLabels:
+      app: lugh-nginx
+  template:
+    metadata:
+      labels:
+        app: lugh-nginx
+        {{- include "lugh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: "nginx:1.27-alpine"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+              name: http
+            - containerPort: 443
+              name: https
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+            - name: static-files
+              mountPath: /app/staticfiles
+              readOnly: true
+            - name: media-files
+              mountPath: /app/media
+              readOnly: true
+          resources:
+            {{- toYaml .Values.nginx.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: lugh-nginx-config
+        - name: static-files
+          persistentVolumeClaim:
+            claimName: lugh-static
+        - name: media-files
+          persistentVolumeClaim:
+            claimName: lugh-media
+{{- end }}

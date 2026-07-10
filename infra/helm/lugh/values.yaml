@@ -1,0 +1,206 @@
+# =============================================================================
+# Lugh by IQS — Helm Values
+# Production defaults. Override with values-local.yaml on the server.
+# =============================================================================
+
+global:
+  namespace: lugh
+  imageRegistry: ghcr.io
+  imageOwner: ""        # Set to your GitHub username/org
+  imageTag: latest
+
+# =============================================================================
+# Django Application
+# =============================================================================
+django:
+  enabled: true
+  image:
+    repository: lugh-django
+    pullPolicy: Always
+  replicas: 2
+  port: 8000
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "512Mi"
+
+  env:
+    DEBUG: "false"
+    DJANGO_SETTINGS_MODULE: "PLC_Project.settings"
+    EXTRA_ALLOWED_HOSTS: "192.168.0.192,localhost"
+    # PLC connection — set to "true" for mock, "false" for real PLC
+    PLC_MOCK: "true"
+    PLC_NETID: "192.168.0.192.1.1"
+    PLC_IP: "mock-plc"   # K8s service name; change to real PLC IP when ready
+    PLC_PORT: "851"
+    # Redis
+    REDIS_URL: "redis://redis:6379/0"
+    # Gunicorn
+    WEB_CONCURRENCY: "4"
+
+  # Secrets (values injected from K8s Secret)
+  secretRef: lugh-secrets
+
+  livenessProbe:
+    httpGet:
+      path: /health/
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /health/
+      port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  staticVolume:
+    size: 1Gi
+
+# =============================================================================
+# NGINX
+# =============================================================================
+nginx:
+  enabled: true
+  image:
+    repository: lugh-nginx
+    pullPolicy: Always
+  replicas: 1
+  # NodePort to expose on the host machine
+  nodePort: 30080
+  nodePortSSL: 30443
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# =============================================================================
+# PostgreSQL
+# =============================================================================
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+  port: 5432
+  database: lugh_db
+  user: lugh_user
+
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""   # Use default storage class
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# =============================================================================
+# Redis
+# =============================================================================
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+    pullPolicy: IfNotPresent
+  port: 6379
+
+  persistence:
+    enabled: false   # Enable for persistent sessions
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# =============================================================================
+# Celery Worker
+# =============================================================================
+celeryWorker:
+  enabled: true
+  replicas: 2
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# =============================================================================
+# Celery Beat
+# =============================================================================
+celeryBeat:
+  enabled: true
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# =============================================================================
+# Mock Beckhoff CX PLC
+# =============================================================================
+mockPlc:
+  enabled: true
+  image:
+    repository: lugh-mock-plc
+    pullPolicy: Always
+  replicas: 1
+  # ADS TCP port (Beckhoff standard)
+  adsPort: 48898
+  # HTTP management API port
+  httpPort: 8080
+
+  # Simulated apartment configurations
+  apartments: 2      # number of apartments to simulate
+  daliChannels: 16   # DALI channels per apartment
+  relayChannels: 4   # wall relays per apartment
+
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 30
+
+# =============================================================================
+# Ingress (optional — for external access via domain name)
+# =============================================================================
+ingress:
+  enabled: false
+  className: nginx
+  host: lugh.local
+  tls: false

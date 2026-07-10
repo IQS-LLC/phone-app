@@ -1,0 +1,60 @@
+# =============================================================================
+# Lugh — Production server overrides  (192.168.0.192)
+# Apply on the server:
+#   helm upgrade --install lugh infra/helm/lugh \
+#     -n lugh --create-namespace \
+#     -f infra/helm/values-server.yaml \
+#     --set global.imageTag=<sha> \
+#     --set django.env.SECRET_KEY="$(kubectl get secret lugh-secrets -n lugh -o jsonpath='{.data.SECRET_KEY}' | base64 -d)" \
+#     --set postgres.password="$(kubectl get secret lugh-secrets -n lugh -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)"
+# =============================================================================
+
+global:
+  imageOwner: "iqs-llc"           # GitHub org — images at ghcr.io/iqs-llc/lugh-django
+  imageRegistry: ghcr.io
+  imageTag: latest                 # CI overrides this with sha-<commit>
+
+# =============================================================================
+# Django
+# =============================================================================
+django:
+  replicas: 1                      # Keep at 1 — DeviceRegistry is in-memory
+  env:
+    DEBUG: "false"
+    EXTRA_ALLOWED_HOSTS: "192.168.0.192,192.168.0.158,localhost"
+
+    # ── Real PLC (Apartment 16 — TwinCAT on 192.168.0.161) ─────────────────
+    PLC_MOCK:  "false"
+    PLC_IP:    "192.168.0.161"     # Beckhoff CX machine IP
+    PLC_NETID: "192.168.0.161.1.1" # AMS Net ID (set in TwinCAT System Manager)
+    PLC_PORT:  "851"               # ADS port (851 = TwinCAT runtime 1)
+
+    REDIS_URL: "redis://redis:6379/0"
+    WEB_CONCURRENCY: "1"
+
+# =============================================================================
+# Nginx
+# =============================================================================
+nginx:
+  nodePort:    30080               # http://192.168.0.192:30080
+  nodePortSSL: 30443
+
+# =============================================================================
+# PostgreSQL
+# =============================================================================
+postgres:
+  persistence:
+    size: 20Gi
+
+# =============================================================================
+# Redis
+# =============================================================================
+redis:
+  persistence:
+    enabled: true                  # Persist Celery results + session cache
+
+# =============================================================================
+# Mock PLC — DISABLED in production (using real Beckhoff hardware)
+# =============================================================================
+mockPlc:
+  enabled: false

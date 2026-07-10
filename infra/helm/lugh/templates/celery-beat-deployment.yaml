@@ -1,0 +1,68 @@
+{{- if .Values.celeryBeat.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-beat
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "lugh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: celery-beat
+spec:
+  # Beat MUST be a singleton — multiple replicas cause duplicate scheduled tasks
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lugh-celery-beat
+  # Recreate ensures only one beat instance at a time during deploys
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lugh-celery-beat
+        {{- include "lugh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: celery-beat
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.35
+          command: ['sh', '-c',
+            'until nc -z redis {{ .Values.redis.port }}; do echo "waiting for redis"; sleep 2; done']
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command: ['sh', '-c',
+            'until nc -z postgres {{ .Values.postgres.port }}; do echo "waiting for postgres"; sleep 2; done']
+      containers:
+        - name: celery-beat
+          image: {{ include "lugh.image" (merge (dict "repository" .Values.django.image.repository "tag" .Values.django.image.tag) .) }}
+          imagePullPolicy: {{ .Values.django.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - PLC_Project
+            - beat
+            - --loglevel=info
+            - --scheduler
+            - django_celery_beat.schedulers:DatabaseScheduler
+          envFrom:
+            - configMapRef:
+                name: lugh-config
+            - secretRef:
+                name: lugh-secrets
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lugh-secrets
+                  key: DB_PASSWORD
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lugh-secrets
+                  key: SECRET_KEY
+          resources:
+            {{- toYaml .Values.celeryBeat.resources | nindent 12 }}
+      restartPolicy: Always
+{{- end }}
