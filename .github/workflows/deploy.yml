@@ -301,10 +301,16 @@ jobs:
     name: Deploy to Production
     runs-on: [self-hosted, synology]
     needs: [build-backend, build-android, build-ios]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Only runs when DEPLOY_ENABLED repo variable = 'true' AND NAS runner is online.
+    # Set it: GitHub repo → Settings → Variables → DEPLOY_ENABLED = true
+    # Leave unset (or 'false') when running local-PC mode — job skips instantly.
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      vars.DEPLOY_ENABLED == 'true'
     environment: production
-    timeout-minutes: 10      # fail fast if NAS runner is offline — don't wait 6 hours
-    continue-on-error: true  # APK/IPA artifacts are still useful when NAS is unreachable
+    timeout-minutes: 10
+    continue-on-error: true
     permissions:
       contents: read
       packages: read
