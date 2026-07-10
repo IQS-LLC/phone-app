@@ -303,6 +303,8 @@ jobs:
     needs: [build-backend, build-android, build-ios]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     environment: production
+    timeout-minutes: 10      # fail fast if NAS runner is offline — don't wait 6 hours
+    continue-on-error: true  # APK/IPA artifacts are still useful when NAS is unreachable
     permissions:
       contents: read
       packages: read
@@ -375,7 +377,7 @@ jobs:
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-android, deploy]
+    needs: [build-android, build-ios]   # deploy is optional — release APK+IPA regardless
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
@@ -386,6 +388,11 @@ jobs:
         with:
           name: lugh-android-apk
 
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lugh-ios-ipa
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -393,20 +400,22 @@ jobs:
           body: |
             ## Lugh ${{ github.ref_name }}
 
-            ### What's included
-            - Signed Android APK (direct install, no Play Store needed)
-            - Backend deployed to production server at 192.168.0.192
-            - Connected to real Beckhoff TwinCAT PLC at 192.168.0.161
-
-            ### Install Android app
-            1. Download `lugh-android-*.apk` below
+            ### Android — direct install
+            1. Download `lugh-android-*.apk`
             2. Transfer to Android device
             3. Enable "Install from unknown sources" in Settings → Security
             4. Tap the APK to install
+
+            ### iOS — sideload (no App Store)
+            1. Download `lugh-ios-*.ipa`
+            2. Use **AltStore** or **Sideloadly** to install on your iPhone
+            3. Trust the developer certificate in Settings → General → VPN & Device Management
 
             ### Server
             - API: `http://192.168.0.192:9080`
             - Health: `http://192.168.0.192:9080/health/`
           draft: false
           prerelease: false
-          files: lugh-android-*.apk
+          files: |
+            lugh-android-*.apk
+            lugh-ios-*.ipa
