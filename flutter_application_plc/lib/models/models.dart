@@ -6,11 +6,18 @@ class DaliDevice {
   final int    channel;
   final String name;
   final String room;
-  const DaliDevice({required this.channel, required this.name, required this.room});
+  final int?   apartmentDeviceId;
+  const DaliDevice({
+    required this.channel,
+    required this.name,
+    required this.room,
+    this.apartmentDeviceId,
+  });
   factory DaliDevice.fromJson(Map<String, dynamic> j) => DaliDevice(
-    channel: j['channel'] as int,
-    name:    j['name']    as String,
-    room:    j['room']    as String,
+    channel:           j['channel']            as int,
+    name:              j['name']               as String,
+    room:              j['room']               as String,
+    apartmentDeviceId: j['apartment_device_id'] as int?,
   );
 }
 

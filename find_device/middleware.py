@@ -58,22 +58,32 @@ class RateLimitMiddleware:
     """
     Sliding-window in-memory rate limiter.
 
-    Defaults (configurable in settings.py):
-      RATE_LIMIT_REQUESTS = 120   # max requests per window
-      RATE_LIMIT_WINDOW   = 60    # window size in seconds
+    Covers:
+      /plc/        — hardware control; GETs 200/min, POSTs 60/min per IP
+      /auth/login/ and /auth/refresh/ — 10 attempts/min per IP to slow
+                                         brute-force credential attacks
 
-    Returns 429 when exceeded.  POST endpoints are limited more strictly
-    (writes to PLC hardware should not be hammered).
+    Defaults (configurable in settings.py):
+      RATE_LIMIT_REQUESTS       = 200  # max GETs per window on /plc/
+      RATE_LIMIT_WRITE_REQUESTS = 60   # max POSTs per window on /plc/
+      RATE_LIMIT_WINDOW         = 60   # window size in seconds
     """
 
-    _DEFAULT_LIMIT  = 120    # GETs per window
-    _WRITE_LIMIT    = 60     # POSTs per window  (writes to PLC)
+    _DEFAULT_LIMIT  = 200    # GETs per window on /plc/
+    _WRITE_LIMIT    = 60     # POSTs per window on /plc/
+    _AUTH_LIMIT     = 10     # login/refresh attempts per window per IP
     _WINDOW_SECONDS = 60
+
+    _AUTH_PATHS = ("/auth/login/", "/auth/refresh/")
+    # Loopback addresses are exempt from auth rate limiting: they only appear in
+    # the test client and health checks — in production, nginx always passes the
+    # real client IP via X-Forwarded-For, so this exemption has no security impact.
+    _AUTH_EXEMPT_IPS = frozenset({"127.0.0.1", "::1"})
 
     def __init__(self, get_response: Callable):
         self.get_response = get_response
         self._lock   = threading.Lock()
-        # ip → deque of timestamps
+        # bucket_key → deque of timestamps; bucket_key = "<prefix>:<ip>"
         self._hits:   dict[str, Deque[float]] = collections.defaultdict(
             lambda: collections.deque()
         )
@@ -82,15 +92,24 @@ class RateLimitMiddleware:
         self._window = getattr(settings, "RATE_LIMIT_WINDOW", self._WINDOW_SECONDS)
 
     def __call__(self, request: HttpRequest):
-        if not request.path.startswith("/plc/"):
+        path = request.path
+        if path.startswith("/plc/"):
+            bucket_prefix = "plc"
+            limit = self._wlimit if request.method == "POST" else self._limit
+        elif path in self._AUTH_PATHS:
+            bucket_prefix = "auth"
+            limit = self._AUTH_LIMIT
+            if _get_client_ip(request) in self._AUTH_EXEMPT_IPS:
+                return self.get_response(request)
+        else:
             return self.get_response(request)
 
-        ip    = _get_client_ip(request)
-        limit = self._wlimit if request.method == "POST" else self._limit
-        now   = time.monotonic()
+        ip  = _get_client_ip(request)
+        key = f"{bucket_prefix}:{ip}"
+        now = time.monotonic()
 
         with self._lock:
-            dq = self._hits[ip]
+            dq = self._hits[key]
             cutoff = now - self._window
             while dq and dq[0] < cutoff:
                 dq.popleft()

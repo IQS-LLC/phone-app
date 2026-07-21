@@ -968,3 +968,323 @@ class RoomAndDeviceLayoutTests(TestCase):
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )
         self.assertEqual(resp.status_code, 403)
+
+
+# =============================================================================
+# Map API
+# =============================================================================
+
+class MapApiTests(TestCase):
+    """
+    End-to-end coverage of the Digital Twin Map Editor REST API.
+
+    Permission matrix:
+      GET  /map/<id>/                        — authenticated member (resident or staff)
+      POST /map/<id>/                        — staff only
+      PUT  /map/<id>/                        — staff only
+      POST /map/<id>/publish/                — staff only
+      GET  /map/<id>/versions/               — staff only
+      POST /map/<id>/versions/<v>/restore/   — staff only
+      GET  /map/apartments/                  — staff only
+      GET  /map/<id>/devices/                — staff only
+    """
+
+    def setUp(self):
+        self.apt16 = Apartment.objects.get(name="Apartment 16")
+        self.apt8  = Apartment.objects.get(name="Apartment 8")
+
+        self.staff    = User.objects.create_user(username="mapstaff",    password="pw12345", is_staff=True)
+        self.resident = User.objects.create_user(username="mapresident", password="pw12345")
+        self.stranger = User.objects.create_user(username="mapstranger", password="pw12345")
+
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apt16,
+            role=ApartmentMembership.ROLE_OWNER, is_default=True,
+        )
+
+    def _token(self, username):
+        resp = self.client.post("/auth/login/", {"username": username, "password": "pw12345"})
+        return resp.json()["access"]
+
+    def _auth(self, username):
+        return {"HTTP_AUTHORIZATION": f"Bearer {self._token(username)}"}
+
+    def _create_layout(self):
+        resp = self.client.post(
+            f"/map/{self.apt16.pk}/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        return resp.json()["layout"]
+
+    # ── Authentication boundary ───────────────────────────────────────────────
+
+    def test_unauthenticated_cannot_get_layout(self):
+        resp = self.client.get(f"/map/{self.apt16.pk}/")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_stranger_cannot_get_layout(self):
+        resp = self.client.get(f"/map/{self.apt16.pk}/", **self._auth("mapstranger"))
+        self.assertEqual(resp.status_code, 403)
+
+    # ── No layout yet ─────────────────────────────────────────────────────────
+
+    def test_get_layout_returns_null_when_none_exists(self):
+        resp = self.client.get(f"/map/{self.apt16.pk}/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertIsNone(body["layout"])
+
+    # ── Staff creates a layout ────────────────────────────────────────────────
+
+    def test_staff_creates_layout_with_default_layers(self):
+        layout = self._create_layout()
+        self.assertIsNotNone(layout)
+        self.assertEqual(layout["apartment_id"], self.apt16.pk)
+        self.assertGreater(len(layout["layers"]), 0)
+        self.assertFalse(layout["is_published"])
+
+    def test_resident_cannot_create_layout(self):
+        resp = self.client.post(
+            f"/map/{self.apt16.pk}/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapresident"),
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    # ── Staff saves objects ───────────────────────────────────────────────────
+
+    def test_staff_saves_canvas_objects(self):
+        import json as _json
+        self._create_layout()
+        payload = {
+            "objects": [
+                {"object_type": "room",   "device_type": "",              "name": "Living Room",
+                 "x": 100, "y": 100, "width": 400, "height": 300},
+                {"object_type": "device", "device_type": "ceiling_light", "name": "Main Light",
+                 "x": 200, "y": 200, "width": 48,  "height": 48,
+                 "plc_variable": "GVL.nBrightness_1"},
+            ],
+        }
+        resp = self.client.put(
+            f"/map/{self.apt16.pk}/",
+            data=_json.dumps(payload).encode(),
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        objects = resp.json()["layout"]["objects"]
+        self.assertEqual(len(objects), 2)
+        self.assertEqual({o["object_type"] for o in objects}, {"room", "device"})
+
+    def test_saved_objects_include_room_name(self):
+        import json as _json
+        room = Room.objects.filter(apartment=self.apt16).first()
+        if room is None:
+            self.skipTest("Apartment 16 has no rooms in fixture")
+        self._create_layout()
+        payload = {"objects": [
+            {"object_type": "room", "name": room.name, "room_id": room.pk,
+             "x": 0, "y": 0, "width": 200, "height": 150},
+        ]}
+        resp = self.client.put(
+            f"/map/{self.apt16.pk}/",
+            data=_json.dumps(payload).encode(),
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        obj = resp.json()["layout"]["objects"][0]
+        self.assertEqual(obj["room_name"], room.name)
+
+    # ── Resident reads the layout ─────────────────────────────────────────────
+
+    def test_resident_can_read_existing_layout(self):
+        self._create_layout()
+        resp = self.client.get(f"/map/{self.apt16.pk}/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNotNone(resp.json()["layout"])
+
+    # ── Cross-apartment isolation ─────────────────────────────────────────────
+
+    def test_resident_cannot_read_other_apartments_layout(self):
+        self.client.post(
+            f"/map/{self.apt8.pk}/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        resp = self.client.get(f"/map/{self.apt8.pk}/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 403)
+
+    # ── Publish ───────────────────────────────────────────────────────────────
+
+    def test_staff_publishes_layout(self):
+        import json as _json
+        self._create_layout()
+        resp = self.client.post(
+            f"/map/{self.apt16.pk}/publish/",
+            data=_json.dumps({"description": "First release"}).encode(),
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        version = resp.json()["version"]
+        self.assertEqual(version["version_number"], 1)
+        self.assertTrue(version["is_published"])
+
+    def test_publish_increments_version_number(self):
+        self._create_layout()
+        for _ in range(3):
+            self.client.post(
+                f"/map/{self.apt16.pk}/publish/",
+                data=b"{}",
+                content_type="application/json",
+                **self._auth("mapstaff"),
+            )
+        resp = self.client.get(f"/map/{self.apt16.pk}/versions/", **self._auth("mapstaff"))
+        numbers = [v["version_number"] for v in resp.json()["versions"]]
+        self.assertIn(3, numbers)
+
+    def test_only_one_published_version_at_a_time(self):
+        self._create_layout()
+        for _ in range(2):
+            self.client.post(
+                f"/map/{self.apt16.pk}/publish/",
+                data=b"{}",
+                content_type="application/json",
+                **self._auth("mapstaff"),
+            )
+        resp = self.client.get(f"/map/{self.apt16.pk}/versions/", **self._auth("mapstaff"))
+        published_count = sum(1 for v in resp.json()["versions"] if v["is_published"])
+        self.assertEqual(published_count, 1)
+
+    def test_resident_cannot_publish(self):
+        self._create_layout()
+        resp = self.client.post(
+            f"/map/{self.apt16.pk}/publish/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapresident"),
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_publish_on_nonexistent_layout_returns_404(self):
+        resp = self.client.post(
+            f"/map/{self.apt8.pk}/publish/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # ── Version list ──────────────────────────────────────────────────────────
+
+    def test_version_list_empty_when_never_published(self):
+        self._create_layout()
+        resp = self.client.get(f"/map/{self.apt16.pk}/versions/", **self._auth("mapstaff"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["versions"], [])
+
+    def test_resident_cannot_list_versions(self):
+        self._create_layout()
+        resp = self.client.get(f"/map/{self.apt16.pk}/versions/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 403)
+
+    # ── Version restore ───────────────────────────────────────────────────────
+
+    def test_version_restore_replaces_objects(self):
+        import json as _json
+        self.client.post(
+            f"/map/{self.apt16.pk}/",
+            data=_json.dumps({"objects": [
+                {"object_type": "room", "name": "Original", "x": 0, "y": 0},
+            ]}).encode(),
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        publish_resp = self.client.post(
+            f"/map/{self.apt16.pk}/publish/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        v1_id = publish_resp.json()["version"]["id"]
+
+        self.client.put(
+            f"/map/{self.apt16.pk}/",
+            data=_json.dumps({"objects": [
+                {"object_type": "room", "name": "New1", "x": 0, "y": 0},
+                {"object_type": "room", "name": "New2", "x": 0, "y": 0},
+            ]}).encode(),
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+
+        restore_resp = self.client.post(
+            f"/map/{self.apt16.pk}/versions/{v1_id}/restore/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(restore_resp.status_code, 200)
+        objects = restore_resp.json()["layout"]["objects"]
+        self.assertEqual(len(objects), 1)
+        self.assertEqual(objects[0]["name"], "Original")
+
+    def test_restore_nonexistent_version_returns_404(self):
+        self._create_layout()
+        resp = self.client.post(
+            f"/map/{self.apt16.pk}/versions/99999/restore/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    # ── Apartment list (editor picker) ────────────────────────────────────────
+
+    def test_apartment_list_staff_only(self):
+        resp = self.client.get("/map/apartments/", **self._auth("mapstaff"))
+        self.assertEqual(resp.status_code, 200)
+        names = {a["name"] for a in resp.json()["apartments"]}
+        self.assertIn("Apartment 16", names)
+
+    def test_apartment_list_shows_layout_status(self):
+        self._create_layout()
+        resp = self.client.get("/map/apartments/", **self._auth("mapstaff"))
+        entry = next(a for a in resp.json()["apartments"] if a["name"] == "Apartment 16")
+        self.assertTrue(entry["has_layout"])
+        self.assertFalse(entry["is_published"])
+
+    def test_apartment_list_shows_published_after_publish(self):
+        self._create_layout()
+        self.client.post(
+            f"/map/{self.apt16.pk}/publish/",
+            data=b"{}",
+            content_type="application/json",
+            **self._auth("mapstaff"),
+        )
+        resp = self.client.get("/map/apartments/", **self._auth("mapstaff"))
+        entry = next(a for a in resp.json()["apartments"] if a["name"] == "Apartment 16")
+        self.assertTrue(entry["is_published"])
+
+    def test_resident_cannot_list_apartments(self):
+        resp = self.client.get("/map/apartments/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 403)
+
+    # ── Device picker ─────────────────────────────────────────────────────────
+
+    def test_device_picker_returns_devices_and_rooms(self):
+        resp = self.client.get(f"/map/{self.apt16.pk}/devices/", **self._auth("mapstaff"))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertIn("devices", body)
+        self.assertIn("rooms", body)
+
+    def test_resident_cannot_access_device_picker(self):
+        resp = self.client.get(f"/map/{self.apt16.pk}/devices/", **self._auth("mapresident"))
+        self.assertEqual(resp.status_code, 403)

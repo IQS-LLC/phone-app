@@ -664,9 +664,9 @@ class CanvasObject(models.Model):
         (DEV_CUSTOM,          "Custom"),
     ]
 
-    layout      = models.ForeignKey(MapLayout, on_delete=models.CASCADE, related_name="objects")
+    layout      = models.ForeignKey(MapLayout, on_delete=models.CASCADE, related_name="canvas_objects")
     layer       = models.ForeignKey(
-        MapLayer, on_delete=models.SET_NULL, null=True, blank=True, related_name="objects",
+        MapLayer, on_delete=models.SET_NULL, null=True, blank=True, related_name="canvas_objects",
     )
     object_type = models.CharField(max_length=10, choices=TYPE_OBJECT_CHOICES, default=TYPE_DEVICE)
     device_type = models.CharField(max_length=30, choices=DEVICE_TYPE_CHOICES, blank=True)
@@ -725,6 +725,7 @@ class CanvasObject(models.Model):
             "plc_variable":     self.plc_variable,
             "apartment_device_id": self.apartment_device_id,
             "room_id":          self.room_id,
+            "room_name":        self.room.name if self.room else None,
             "color":            self.color,
             "label_visible":    self.label_visible,
             "group_id":         self.group_id,

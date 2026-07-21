@@ -314,7 +314,6 @@ jobs:
       vars.DEPLOY_ENABLED == 'true'
     environment: production
     timeout-minutes: 10
-    continue-on-error: true
     permissions:
       contents: read
       packages: read
@@ -350,7 +349,10 @@ jobs:
           COMPOSE_FILE=/volume1/docker/lugh/docker-compose.prod.yml
           DJANGO_IMAGE="${DOCKERHUB_USERNAME}/lugh-django:latest"
 
-          chmod 666 /var/run/docker.sock
+          # Requires the self-hosted runner OS user to be in the 'docker' group:
+          #   sudo usermod -aG docker <runner-user> && newgrp docker
+          # Do NOT chmod 666 /var/run/docker.sock — that grants any local process
+          # full Docker daemon control (container escape, host access).
 
           echo "==> Pulling new django image (public Docker Hub — no login needed)"
           docker pull "$DJANGO_IMAGE"

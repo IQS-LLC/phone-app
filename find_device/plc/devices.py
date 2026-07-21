@@ -92,14 +92,16 @@ class DaliChannel:
 
     MAX_CHANNEL = 28
 
-    def __init__(self, channel: int, name: str, room: str, client):
+    def __init__(self, channel: int, name: str, room: str, client,
+                 apartment_device_id: int = 0):
         if not 1 <= channel <= self.MAX_CHANNEL:
             raise ValueError(f"DALI channel must be 1-{self.MAX_CHANNEL}, got {channel}")
-        self.channel = channel
-        self.name    = name
-        self.room    = room
-        self._client = client
-        self._mock_level = 0
+        self.channel              = channel
+        self.name                 = name
+        self.room                 = room
+        self.apartment_device_id  = apartment_device_id
+        self._client              = client
+        self._mock_level          = 0
 
     @property
     def _var_level(self)     -> str: return f'gvlDALI.aPyLevel[{self.channel}]'
@@ -136,6 +138,7 @@ class DaliChannel:
 
     def to_dict(self) -> Dict[str, Any]:
         return {'channel': self.channel, 'name': self.name, 'room': self.room,
+                'apartment_device_id': self.apartment_device_id,
                 'device_type': 'dali_light'}
 
 

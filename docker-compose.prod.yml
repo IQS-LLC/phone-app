@@ -30,6 +30,7 @@ x-django-env: &django-env
     DB_USER:      lugh_user
     DB_HOST:      db
     DB_PORT:      "5432"
+    DB_PASSWORD:  ${POSTGRES_PASSWORD}
     REDIS_URL:    redis://redis:6379/0
     DEBUG:        "false"
     EXTRA_ALLOWED_HOSTS: "192.168.0.192,192.168.0.158,localhost"
@@ -37,6 +38,9 @@ x-django-env: &django-env
     PLC_IP:    "192.168.0.161"
     PLC_NETID: "192.168.0.161.1.1"
     PLC_PORT:  "851"
+    # Subnets to scan when the installer uses the Commissioning Wizard's
+    # "Discover PLCs" step. Comma-separated CIDR notation.
+    PLC_DISCOVERY_SUBNETS: "192.168.0.0/24"
     WEB_CONCURRENCY: "1"
 
 services:

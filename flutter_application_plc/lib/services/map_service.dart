@@ -31,6 +31,8 @@ class MapService {
     return Uri.parse('$base$path');
   }
 
+  Future<String?> getBaseUrl() => _getBaseUrl();
+
   Map<String, dynamic>? _ok(http.Response resp) {
     try {
       final j = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -96,6 +98,19 @@ class MapService {
         .delete(await _uri('/map/$apartmentId/background/'), headers: await _headers(json: false))
         .timeout(const Duration(seconds: 10));
     return _ok(resp) != null;
+  }
+
+  Future<String?> uploadBackgroundFile(int apartmentId, List<int> bytes, String filename) async {
+    final token   = await _getToken();
+    final baseUrl = await _getBaseUrl() ?? 'http://10.0.2.2:8000';
+    final uri     = Uri.parse('$baseUrl/map/$apartmentId/background/');
+    final req     = http.MultipartRequest('POST', uri);
+    if (token != null) req.headers['Authorization'] = 'Bearer $token';
+    req.files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+    final streamed = await req.send().timeout(const Duration(seconds: 30));
+    final resp    = await http.Response.fromStream(streamed);
+    final j = _ok(resp);
+    return j?['url'] as String?;
   }
 
   // ── Publish ─────────────────────────────────────────────────────────────────

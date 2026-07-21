@@ -10,11 +10,17 @@ Queues:
 from __future__ import annotations
 
 import logging
+import time
 
 from celery import shared_task
 from django.utils import timezone
 
 logger = logging.getLogger("lumina.tasks")
+
+# Per-alarm cooldown: don't re-notify within this many seconds for the same
+# (device_id, var_name) pair while the alarm stays active.
+_ALARM_COOLDOWN_S = 300  # 5 minutes
+_alarm_last_notified: dict[tuple, float] = {}
 
 
 # ── PLC polling ───────────────────────────────────────────────────────────────
@@ -106,6 +112,8 @@ def check_alarms(self):
     """
     Evaluate alarm thresholds against the last-known PLC state and dispatch
     push notifications for any that have become active since the last check.
+    A per-alarm cooldown (_ALARM_COOLDOWN_S) prevents notification storms when
+    an alarm condition remains active across multiple evaluation cycles.
 
     Runs every 5 s via Celery Beat.
     """
@@ -114,15 +122,26 @@ def check_alarms(self):
         from .realtime.views import DeviceValueCache
 
         cache = DeviceValueCache.instance()
-        devices = PLCDevice.objects.filter(is_active=True)
+        now   = time.monotonic()
+        # Guard: apartment FK is nullable — skip devices with no linked apartment
+        devices = PLCDevice.objects.filter(is_active=True).select_related("apartment")
 
         for device in devices:
+            if device.apartment is None:
+                continue
+
             snapshot = cache.get_all(device.pk)
             for var_name, (label, predicate) in _ALARM_THRESHOLDS.items():
                 entry = snapshot.get(var_name)
                 if entry is None:
                     continue
                 if predicate(entry.get("value")):
+                    cooldown_key = (device.pk, var_name)
+                    last_sent = _alarm_last_notified.get(cooldown_key, 0)
+                    if now - last_sent < _ALARM_COOLDOWN_S:
+                        continue  # within cooldown window — skip
+
+                    _alarm_last_notified[cooldown_key] = now
                     logger.warning(
                         "ALARM: device=%d  %s=%s  (%s)",
                         device.pk, var_name, entry.get("value"), label,
@@ -155,7 +174,7 @@ def send_notification(self, apartment_id: int, title: str, body: str,
         from .models import ApartmentMembership
         members = ApartmentMembership.objects.filter(
             apartment_id=apartment_id,
-        ).select_related("user__userprofile")
+        ).select_related("user", "user__profile")
 
         logger.info(
             "NOTIFICATION [%s] apt=%d  '%s': %s  (%d members)",
@@ -173,19 +192,19 @@ def send_notification(self, apartment_id: int, title: str, body: str,
 def expire_temporary_access():
     """
     Sweep TemporaryAccess grants that have passed their expires_at timestamp
-    and mark them as expired.  Runs every minute via Beat.
+    and mark them as revoked.  Runs every minute via Beat.
     """
     try:
         from .models import TemporaryAccess
         now = timezone.now()
         expired = TemporaryAccess.objects.filter(
             expires_at__lte=now,
-            is_active=True,
+            revoked=False,
         )
         count = expired.count()
         if count:
-            expired.update(is_active=False)
-            logger.info("expire_temporary_access: deactivated %d grant(s)", count)
+            expired.update(revoked=True)
+            logger.info("expire_temporary_access: revoked %d grant(s)", count)
     except Exception as exc:
         logger.error("expire_temporary_access: error — %s", exc)
 
@@ -202,13 +221,9 @@ def archive_audit_log():
 
         cutoff = tz.now() - timedelta(days=90)
 
-        # Import lazily — AuditLog may not exist in all deployments yet
-        try:
-            from .models import AuditLog
-            deleted, _ = AuditLog.objects.filter(timestamp__lt=cutoff).delete()
-            if deleted:
-                logger.info("archive_audit_log: purged %d entries older than 90d", deleted)
-        except ImportError:
-            pass   # AuditLog not yet added to models
+        from .models import AuditLog
+        deleted, _ = AuditLog.objects.filter(created_at__lt=cutoff).delete()
+        if deleted:
+            logger.info("archive_audit_log: purged %d entries older than 90d", deleted)
     except Exception as exc:
         logger.error("archive_audit_log: error — %s", exc)

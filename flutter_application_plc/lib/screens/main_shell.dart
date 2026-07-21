@@ -8,6 +8,7 @@ import 'log_screen.dart';
 import 'map_editor_screen.dart';
 import 'map_mode_screen.dart';
 import 'settings_screen.dart';
+import 'commissioning_wizard_screen.dart';
 
 /// Persistent shell with animated bottom nav.
 /// Map Mode is a full-screen overlay that hides everything else.
@@ -21,9 +22,10 @@ class MainShell extends StatefulWidget {
 }
 
 class _MainShellState extends State<MainShell> {
-  int  _index      = 0;
-  bool _mapMode    = false;
-  bool _editorMode = false;
+  int  _index        = 0;
+  bool _mapMode      = false;
+  bool _editorMode   = false;
+  bool _wizardMode   = false;
 
   void _onTap(int i) {
     if (i == _index) return;
@@ -31,15 +33,24 @@ class _MainShellState extends State<MainShell> {
     setState(() => _index = i);
   }
 
-  void _openMap()    => setState(() => _mapMode    = true);
-  void _closeMap()   => setState(() => _mapMode    = false);
-  void _openEditor() => setState(() => _editorMode = true);
+  void _openMap()     => setState(() => _mapMode    = true);
+  void _closeMap()    => setState(() => _mapMode    = false);
+  void _openEditor()  => setState(() => _editorMode = true);
   void _closeEditor() => setState(() => _editorMode = false);
+  void _openWizard()  => setState(() => _wizardMode = true);
+  void _closeWizard() => setState(() => _wizardMode = false);
 
   bool get _isStaff => widget.authState.user?.isStaff ?? false;
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.authState,
+      builder: (ctx, _) => _buildShell(ctx),
+    );
+  }
+
+  Widget _buildShell(BuildContext context) {
     return Stack(children: [
 
       // ── Regular shell ────────────────────────────────────────────────────
@@ -57,7 +68,7 @@ class _MainShellState extends State<MainShell> {
             SettingsScreen(
               appState:        widget.appState,
               authState:       widget.authState,
-              onOpenMapEditor: _isStaff ? _openEditor : null,
+              onOpenMapEditor: _openEditor,
             ),
           ],
         ),
@@ -68,8 +79,12 @@ class _MainShellState extends State<MainShell> {
       if (_mapMode)
         Positioned.fill(
           child: MapModeScreen(
-            appState: widget.appState,
-            onClose:  _closeMap,
+            appState:       widget.appState,
+            authState:      widget.authState,
+            onClose:        _closeMap,
+            apartmentLabel: widget.authState.apartmentName != null
+                ? 'Apartment ${widget.authState.apartmentName}'
+                : null,
           ),
         ),
 
@@ -82,39 +97,36 @@ class _MainShellState extends State<MainShell> {
           ),
         ),
 
-      // ── Map Editor entry button (staff only) ──────────────────────────────
-      if (_isStaff && !_mapMode && !_editorMode)
+      // ── Commissioning Wizard overlay (staff only) ─────────────────────────
+      if (_wizardMode)
+        Positioned.fill(
+          child: CommissioningWizardScreen(
+            authState: widget.authState,
+            onClose:   _closeWizard,
+          ),
+        ),
+
+      // ── Staff floating action buttons (hidden while any overlay is open) ──
+      if (_isStaff && !_mapMode && !_editorMode && !_wizardMode)
         Positioned(
-          right: 16,
+          right:  16,
           bottom: MediaQuery.of(context).padding.bottom + 84,
-          child: GestureDetector(
-            onTap: _openEditor,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color:        C.surface,
-                borderRadius: BorderRadius.circular(24),
-                border:       Border.all(color: C.border, width: 0.5),
-                boxShadow: [
-                  BoxShadow(
-                    color:      Colors.black.withAlpha(80),
-                    blurRadius: 12,
-                    offset:     const Offset(0, 4),
-                  ),
-                ],
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _StaffFab(
+                icon:  Icons.checklist_rounded,
+                label: 'Commission',
+                onTap: _openWizard,
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.edit_square, size: 16, color: C.accent),
-                const SizedBox(width: 7),
-                Text('Map Editor',
-                    style: TextStyle(
-                      fontFamily: 'Inter',
-                      fontSize:   12,
-                      fontWeight: FontWeight.w700,
-                      color:      C.accent,
-                    )),
-              ]),
-            ),
+              const SizedBox(height: 10),
+              _StaffFab(
+                icon:  Icons.edit_square,
+                label: 'Map Editor',
+                onTap: _openEditor,
+              ),
+            ],
           ),
         ),
     ]);
@@ -257,4 +269,45 @@ class _Tab {
   final IconData icon, iconOff;
   final String   label;
   const _Tab({required this.icon, required this.iconOff, required this.label});
+}
+
+class _StaffFab extends StatelessWidget {
+  final IconData icon;
+  final String   label;
+  final VoidCallback onTap;
+
+  const _StaffFab({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color:        C.surface,
+          borderRadius: BorderRadius.circular(24),
+          border:       Border.all(color: C.border, width: 0.5),
+          boxShadow: [
+            BoxShadow(
+              color:      Colors.black.withAlpha(80),
+              blurRadius: 12,
+              offset:     const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 16, color: C.accent),
+          const SizedBox(width: 7),
+          Text(label,
+              style: const TextStyle(
+                fontFamily: 'Inter',
+                fontSize:   12,
+                fontWeight: FontWeight.w700,
+                color:      C.accent,
+              )),
+        ]),
+      ),
+    );
+  }
 }

@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -174,6 +177,12 @@ class _MapEditorState extends State<MapEditorScreen> {
   bool _saving  = false;
   bool _dirty   = false;
 
+  // ── Background image ─────────────────────────────────────────────────────────
+  String    _baseUrl     = '';
+  bool      _uploadingBg = false;
+  ui.Image? _bgImage;
+  String    _bgImageUrl  = '';
+
   // ── Layout size ──────────────────────────────────────────────────────────────
   Size _canvasSize = const Size(2000, 1500);
 
@@ -185,6 +194,12 @@ class _MapEditorState extends State<MapEditorScreen> {
       getBaseUrl: widget.authState.service.getBaseUrl,
     );
     _loadApartments();
+    _svc.getBaseUrl().then((url) {
+      if (!mounted) return;
+      setState(() { _baseUrl = url ?? ''; });
+      final bgUrl = _layout?.backgroundUrl ?? '';
+      if (bgUrl.isNotEmpty && _bgImage == null) _loadBgImage(bgUrl);
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +257,89 @@ class _MapEditorState extends State<MapEditorScreen> {
     _layers     = layout.layers.map((l) => l.copyWith()).toList();
     _canvasSize = Size(layout.canvasWidth, layout.canvasHeight);
     _dirty      = false;
+    _bgImage    = null;
+    _bgImageUrl = '';
+    if (layout.backgroundUrl.isNotEmpty) {
+      _loadBgImage(layout.backgroundUrl);
+    }
+  }
+
+  String _fullBgUrl(String url) {
+    if (url.startsWith('http')) return url;
+    if (_baseUrl.isNotEmpty) return '$_baseUrl$url';
+    return url;
+  }
+
+  Future<void> _loadBgImage(String url) async {
+    if (url.isEmpty) return;
+    final fullUrl = _fullBgUrl(url);
+    if (fullUrl == _bgImageUrl) return;
+    _bgImageUrl = fullUrl;
+    try {
+      final provider  = NetworkImage(fullUrl);
+      final stream    = provider.resolve(ImageConfiguration.empty);
+      final completer = Completer<ui.Image>();
+      late ImageStreamListener listener;
+      listener = ImageStreamListener(
+        (info, _) {
+          if (!completer.isCompleted) completer.complete(info.image);
+          stream.removeListener(listener);
+        },
+        onError: (_, _) {
+          if (!completer.isCompleted) completer.completeError('load failed');
+          stream.removeListener(listener);
+        },
+      );
+      stream.addListener(listener);
+      final img = await completer.future;
+      if (!mounted) return;
+      setState(() { _bgImage = img; });
+    } catch (_) {}
+  }
+
+  Future<void> _uploadFloorPlan() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    if (file.bytes == null || _apartment == null) return;
+
+    setState(() { _uploadingBg = true; });
+    try {
+      final url = await _svc.uploadBackgroundFile(
+        _apartment!.id, file.bytes!, file.name,
+      );
+      if (!mounted) return;
+      if (url != null) {
+        if (_layout == null) {
+          // No layout yet — create one via save first
+          final saved = await _svc.saveLayout(
+            _apartment!.id,
+            EditorLayout(
+              id: 0, apartmentId: _apartment!.id,
+              apartmentName: _apartment!.name,
+              backgroundUrl: url,
+              layers: _layers,
+              objects: _objects,
+            ),
+          );
+          if (saved != null && mounted) _applyLayout(saved);
+        } else {
+          setState(() {
+            _layout!.backgroundUrl     = url;
+            _layout!.backgroundVisible = true;
+            _dirty                     = true;
+          });
+          _bgImageUrl = '';
+          _loadBgImage(url);
+        }
+      }
+    } finally {
+      if (mounted) setState(() { _uploadingBg = false; });
+    }
   }
 
   List<EditorLayer> _defaultLayers() => [
@@ -563,8 +661,76 @@ class _MapEditorState extends State<MapEditorScreen> {
   // Save / publish
   // ─────────────────────────────────────────────────────────────────────────────
 
+  ({List<String> errors, List<String> warnings}) _validateLayout() {
+    final errors   = <String>[];
+    final warnings = <String>[];
+    final devObjs  = _objects.where((o) => o.objectType == 'device');
+
+    // Duplicate PLC variables
+    final plcSeen = <String, List<EditorObject>>{};
+    for (final o in devObjs) {
+      if (o.plcVariable.isEmpty) continue;
+      (plcSeen[o.plcVariable] ??= []).add(o);
+    }
+    for (final entry in plcSeen.entries) {
+      if (entry.value.length > 1) {
+        final names = entry.value
+            .map((o) => o.name.isEmpty ? o.deviceType : o.name)
+            .join(', ');
+        errors.add('Duplicate PLC variable "${entry.key}" used by: $names');
+      }
+    }
+
+    // Missing PLC link on controllable devices
+    const needsLink = {
+      'ceiling_light', 'pendant_light', 'led_strip', 'relay_light',
+      'curtain', 'blind',
+    };
+    for (final o in devObjs) {
+      if (!needsLink.contains(o.deviceType)) continue;
+      if (o.plcVariable.isEmpty && o.apartmentDeviceId == null) {
+        final label = o.name.isEmpty ? o.deviceType : o.name;
+        warnings.add('"$label" has no PLC variable or device link');
+      }
+    }
+
+    return (errors: errors, warnings: warnings);
+  }
+
   Future<void> _save() async {
     if (_apartment == null) return;
+
+    final validation = _validateLayout();
+    if (validation.errors.isNotEmpty) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: const Color(0xFF0F1525),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text('Cannot Save', style: AppText.h2),
+          content: Text(
+            validation.errors.join('\n\n'),
+            style: AppText.small.copyWith(color: C.textSec),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('Fix Issues',
+                  style: AppText.small.copyWith(color: C.accent)),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    if (validation.warnings.isNotEmpty) {
+      _showSnack(
+        '${validation.warnings.length} device(s) have no PLC link',
+        isError: false,
+      );
+    }
+
     setState(() { _saving = true; });
     HapticFeedback.mediumImpact();
 
@@ -733,6 +899,7 @@ class _MapEditorState extends State<MapEditorScreen> {
               showGrid:  _showGrid,
               gridSize:  _gridSize,
               bgUrl:     _layout?.backgroundUrl ?? '',
+              bgImage:   _bgImage,
               bgX: _layout?.backgroundX ?? 0, bgY: _layout?.backgroundY ?? 0,
               bgW: _layout?.backgroundWidth  ?? _canvasSize.width,
               bgH: _layout?.backgroundHeight ?? _canvasSize.height,
@@ -871,6 +1038,23 @@ class _MapEditorState extends State<MapEditorScreen> {
             _FabBtn(icon: Icons.delete_outline_rounded, color: C.red, onTap: _deleteSelected),
           ]),
         ),
+
+      // ── Floor plan upload FAB ──────────────────────────────────────────────
+      if (_selected == null && _activeTool == null && _apartment != null)
+        Positioned(
+          right: 12,
+          bottom: _showLayers || _showVersions ? 220 : 160,
+          child: _uploadingBg
+              ? const SizedBox(
+                  width: 36, height: 36,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: C.accent),
+                )
+              : _FabBtn(
+                  icon: Icons.image_outlined,
+                  onTap: _uploadFloorPlan,
+                  color: const Color(0xFF7B8FF5),
+                ),
+        ),
     ]);
   }
 }
@@ -887,17 +1071,19 @@ class _CanvasPainter extends CustomPainter {
   final double canvasW, canvasH;
   final bool   showGrid;
   final double gridSize;
-  final String bgUrl;
+  final String    bgUrl;
+  final ui.Image? bgImage;
   final double bgX, bgY, bgW, bgH, bgOpacity;
   final bool   bgVisible;
   final String? activeTool;
 
-  const _CanvasPainter({
+  _CanvasPainter({
     required this.objects, required this.layers, required this.selected,
     required this.tx, required this.ty, required this.scale,
     required this.canvasW, required this.canvasH,
     required this.showGrid, required this.gridSize,
-    required this.bgUrl, required this.bgX, required this.bgY,
+    required this.bgUrl, required this.bgImage,
+    required this.bgX, required this.bgY,
     required this.bgW, required this.bgH, required this.bgOpacity,
     required this.bgVisible, required this.activeTool,
   });
@@ -924,22 +1110,36 @@ class _CanvasPainter extends CustomPainter {
         ..strokeWidth = 2 / scale,
     );
 
-    // Background placeholder (URL image can't be loaded in CustomPainter directly,
-    // show a guide rect instead; actual image shown via Stack > Image.network above)
-    if (bgVisible && bgUrl.isNotEmpty) {
-      canvas.drawRect(
-        Rect.fromLTWH(bgX, bgY, bgW, bgH),
-        Paint()..color = Color(0xFF1A2030).withValues(alpha: bgOpacity * 0.6),
-      );
-      canvas.drawRect(
-        Rect.fromLTWH(bgX, bgY, bgW, bgH),
-        Paint()
-          ..color = Color(0xFF2A3A5A).withValues(alpha: bgOpacity)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1 / scale,
-      );
-      _drawText(canvas, 'Background Image', Offset(bgX + 8, bgY + 8),
-          fontSize: 10, color: const Color(0xFF3A4A6A));
+    // Background image
+    if (bgVisible) {
+      if (bgImage != null) {
+        canvas.saveLayer(
+          Rect.fromLTWH(bgX, bgY, bgW, bgH),
+          Paint()..color = Color.fromRGBO(255, 255, 255, bgOpacity.clamp(0.0, 1.0)),
+        );
+        canvas.drawImageRect(
+          bgImage!,
+          Rect.fromLTWH(0, 0, bgImage!.width.toDouble(), bgImage!.height.toDouble()),
+          Rect.fromLTWH(bgX, bgY, bgW, bgH),
+          Paint(),
+        );
+        canvas.restore();
+      } else if (bgUrl.isNotEmpty) {
+        // Guide placeholder shown while image is loading
+        canvas.drawRect(
+          Rect.fromLTWH(bgX, bgY, bgW, bgH),
+          Paint()..color = Color(0xFF1A2030).withValues(alpha: bgOpacity * 0.6),
+        );
+        canvas.drawRect(
+          Rect.fromLTWH(bgX, bgY, bgW, bgH),
+          Paint()
+            ..color = Color(0xFF2A3A5A).withValues(alpha: bgOpacity)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1 / scale,
+        );
+        _drawText(canvas, 'Loading background…', Offset(bgX + 8, bgY + 8),
+            fontSize: 10, color: const Color(0xFF3A4A6A));
+      }
     }
 
     // Grid
@@ -1217,7 +1417,7 @@ class _CanvasPainter extends CustomPainter {
       old.objects != objects || old.selected != selected ||
       old.tx != tx || old.ty != ty || old.scale != scale ||
       old.showGrid != showGrid || old.activeTool != activeTool ||
-      old.bgUrl != bgUrl;
+      old.bgUrl != bgUrl || old.bgImage != bgImage;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1608,7 +1808,18 @@ class _PropertiesPanelState extends State<_PropertiesPanel> {
                     style: AppText.small.copyWith(fontSize: 12, color: C.textPri),
                     underline: const SizedBox.shrink(),
                     isDense: true,
-                    onChanged: (v) { setState(() { o.roomId = v; widget.onChanged(); }); },
+                    onChanged: (v) {
+                      setState(() {
+                        o.roomId = v;
+                        if (v != null) {
+                          final room = widget.rooms.where((r) => r['id'] == v).firstOrNull;
+                          o.roomName = room?['name'] as String?;
+                        } else {
+                          o.roomName = null;
+                        }
+                        widget.onChanged();
+                      });
+                    },
                     items: [
                       const DropdownMenuItem(value: null, child: Text('(none)')),
                       ...widget.rooms.map((r) => DropdownMenuItem(
@@ -1622,7 +1833,25 @@ class _PropertiesPanelState extends State<_PropertiesPanel> {
                 // PLC Variable
                 _PropField(label: 'PLC Variable', ctrl: _plcCtrl,
                     hint: 'gvlDALI.aPyLevel[1]',
-                    onChanged: (_) => widget.onChanged()),
+                    onChanged: (_) { setState(() {}); widget.onChanged(); }),
+                if (o.objectType == 'device' &&
+                    _plcCtrl.text.trim().isEmpty &&
+                    o.apartmentDeviceId == null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3, bottom: 2),
+                    child: Row(children: [
+                      const Icon(Icons.warning_amber_rounded,
+                          size: 12, color: Color(0xFFFFB74D)),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          'No PLC variable or device link — not functional in Digital Twin',
+                          style: AppText.small.copyWith(
+                              fontSize: 10, color: const Color(0xFFFFB74D)),
+                        ),
+                      ),
+                    ]),
+                  ),
                 if (widget.devices.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   _PropRow(label: 'Link Device', child: DropdownButton<int?>(

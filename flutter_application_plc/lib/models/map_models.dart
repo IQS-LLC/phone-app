@@ -65,10 +65,11 @@ class EditorObject {
   double x, y, width, height;
   double rotation;
 
-  String plcVariable;
-  int?   apartmentDeviceId;
-  int?   roomId;
-  String color;
+  String  plcVariable;
+  int?    apartmentDeviceId;
+  int?    roomId;
+  String? roomName;
+  String  color;
   bool   labelVisible;
   String groupId;
   Map<String, dynamic> properties;
@@ -88,6 +89,7 @@ class EditorObject {
     this.plcVariable  = '',
     this.apartmentDeviceId,
     this.roomId,
+    this.roomName,
     this.color        = '',
     this.labelVisible = true,
     this.groupId      = '',
@@ -109,6 +111,7 @@ class EditorObject {
     plcVariable:        j['plc_variable']          as String? ?? '',
     apartmentDeviceId:  j['apartment_device_id']   as int?,
     roomId:             j['room_id']               as int?,
+    roomName:           j['room_name']             as String?,
     color:              j['color']                 as String? ?? '',
     labelVisible:       j['label_visible']         as bool?   ?? true,
     groupId:            j['group_id']              as String? ?? '',
@@ -130,6 +133,7 @@ class EditorObject {
     'plc_variable':         plcVariable,
     'apartment_device_id':  apartmentDeviceId,
     'room_id':              roomId,
+    'room_name':            roomName,
     'color':                color,
     'label_visible':        labelVisible,
     'group_id':             groupId,

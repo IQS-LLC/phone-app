@@ -508,14 +508,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
             builder: (_) => ApartmentManagementScreen(authState: widget.authState!),
           )),
         ),
-        if (widget.onOpenMapEditor != null) ...[
-          const Divider(height: 0.5, thickness: 0.5, color: C.border),
-          _SettingsNavRow(
-            icon: Icons.map_rounded, iconColor: C.teal,
-            label: 'Map Editor', sub: 'Create and edit floor-plan zones for any apartment',
-            onTap: widget.onOpenMapEditor!,
-          ),
-        ],
+        // Map Editor — always shown inside Tech Team section (section already gated by isStaff)
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        _SettingsNavRow(
+          icon: Icons.map_rounded, iconColor: C.teal,
+          label: 'Map Editor', sub: 'Create and edit floor-plan zones for any apartment',
+          onTap: widget.onOpenMapEditor ?? () {},
+        ),
       ]),
     ),
   ]);

@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, auth_views, device_views, user_management_views, map_views
+from . import views, auth_views, device_views, user_management_views, map_views, commissioning_views
 from .discovery import views as discovery_views
 from .realtime import views as realtime_views
 
@@ -108,6 +108,13 @@ apartment_management_urlpatterns = [
 realtime_urlpatterns = [
     path('<int:device_id>/stream/',   realtime_views.sse_stream,  name='realtime-sse-stream'),
     path('<int:device_id>/snapshot/', realtime_views.snapshot,    name='realtime-snapshot'),
+]
+
+# Mounted at /commissioning/ in PLC_Project/urls.py — Tech Team wizard only
+commissioning_urlpatterns = [
+    path('<int:apartment_id>/checklist/', commissioning_views.checklist, name='commissioning-checklist'),
+    path('<int:apartment_id>/test-io/',   commissioning_views.test_io,   name='commissioning-test-io'),
+    path('<int:apartment_id>/summary/',   commissioning_views.summary,   name='commissioning-summary'),
 ]
 
 # Mounted at /map/ in PLC_Project/urls.py

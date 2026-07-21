@@ -119,7 +119,8 @@ class DeviceRegistry:
             for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
                 room_name = d.room.name if d.room else 'Unassigned'
                 if d.device_type == ApartmentDevice.TYPE_DALI:
-                    self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name)
+                    self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name,
+                                  apartment_device_id=d.pk)
                 elif d.device_type == ApartmentDevice.TYPE_RELAY:
                     self.add_relay(channel=d.channel_or_index, name=d.name, room=room_name)
                 elif d.device_type == ApartmentDevice.TYPE_SWITCH:
@@ -152,9 +153,10 @@ class DeviceRegistry:
 
     # ── Registration helpers ──────────────────────────────────────────────────
 
-    def add_dali(self, channel: int, name: str, room: str):
+    def add_dali(self, channel: int, name: str, room: str, apartment_device_id: int = 0):
         with self._lock:
-            self._dali[channel] = DaliChannel(channel, name, room, self._client)
+            self._dali[channel] = DaliChannel(channel, name, room, self._client,
+                                              apartment_device_id=apartment_device_id)
 
     def add_relay(self, channel: int, name: str, room: str):
         with self._lock:

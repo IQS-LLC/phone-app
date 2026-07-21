@@ -51,7 +51,7 @@ def _layout_dict(layout):
     layers = list(layout.layers.values(
         "id", "name", "layer_type", "visible", "locked", "sort_order",
     ))
-    objects = [obj.to_dict() for obj in layout.objects.select_related("layer", "room", "apartment_device")]
+    objects = [obj.to_dict() for obj in layout.canvas_objects.select_related("layer", "room", "apartment_device")]
     return {
         "id":                 layout.pk,
         "apartment_id":       layout.apartment_id,
@@ -98,7 +98,7 @@ def apartment_list(request):
             ml = a.map_layout
             has_layout   = True
             is_published = ml.is_published
-            object_count = ml.objects.count()
+            object_count = ml.canvas_objects.count()
         except MapLayout.DoesNotExist:
             has_layout   = False
             is_published = False
@@ -133,7 +133,7 @@ def layout(request, apartment_id):
     # ── GET: any authenticated member reads the layout ──────────────────────
     if request.method == "GET":
         try:
-            ml = MapLayout.objects.prefetch_related("layers", "objects").get(apartment=apartment)
+            ml = MapLayout.objects.prefetch_related("layers", "canvas_objects").get(apartment=apartment)
         except MapLayout.DoesNotExist:
             return _ok(layout=None)
         return _ok(layout=_layout_dict(ml))
@@ -210,7 +210,7 @@ def layout(request, apartment_id):
         # Build a lookup from layer name → layer id for convenience
         layer_map = {l.pk: l for l in ml.layers.all()}
         # Delete all existing and re-create (simpler than diff for bulk save)
-        ml.objects.all().delete()
+        ml.canvas_objects.all().delete()
         for i, od in enumerate(data["objects"]):
             layer_id = od.get("layer_id")
             layer    = layer_map.get(layer_id)
@@ -261,17 +261,24 @@ def background(request, apartment_id):
         ml.save(update_fields=["background_url", "updated_at"])
         return _ok(message="Background removed")
 
+    _ALLOWED_BG_EXTS = {".jpg", ".jpeg", ".png", ".pdf", ".svg"}
+
     # POST — accept either JSON {"url": "..."} or multipart file
     if request.content_type and "multipart" in request.content_type:
         f = request.FILES.get("file")
         if not f:
             return _err("No file in request")
+        ext = os.path.splitext(f.name)[1].lower()
+        if ext not in _ALLOWED_BG_EXTS:
+            return _err(
+                f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(_ALLOWED_BG_EXTS))}",
+                status=400,
+            )
         from django.conf import settings as django_settings
         import uuid
         media_root = getattr(django_settings, "MEDIA_ROOT", "/app/media")
         media_url  = getattr(django_settings, "MEDIA_URL", "/media/")
         os.makedirs(os.path.join(media_root, "map_backgrounds"), exist_ok=True)
-        ext      = os.path.splitext(f.name)[1].lower()
         filename = f"map_backgrounds/{uuid.uuid4().hex}{ext}"
         dest     = os.path.join(media_root, filename)
         with open(dest, "wb") as fh:
@@ -311,7 +318,7 @@ def publish(request, apartment_id):
         data = {}
     description = data.get("description", "")
 
-    snapshot = [obj.to_dict() for obj in ml.objects.all()]
+    snapshot = [obj.to_dict() for obj in ml.canvas_objects.all()]
     last = MapVersion.objects.filter(layout=ml).order_by("-version_number").first()
     version_number = (last.version_number + 1) if last else 1
 
@@ -377,7 +384,7 @@ def version_restore(request, apartment_id, version_id):
     snapshot = v.snapshot
     layer_map = {l.pk: l for l in ml.layers.all()}
 
-    ml.objects.all().delete()
+    ml.canvas_objects.all().delete()
     for od in (snapshot if isinstance(snapshot, list) else []):
         layer_id = od.get("layer_id")
         layer    = layer_map.get(layer_id)

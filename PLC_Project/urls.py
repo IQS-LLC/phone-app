@@ -11,6 +11,7 @@ from find_device.urls import (
     apartment_management_urlpatterns,
     realtime_urlpatterns,
     map_urlpatterns,
+    commissioning_urlpatterns,
 )
 
 
@@ -45,4 +46,7 @@ urlpatterns = [
     # ── Digital Twin Map Editor ───────────────────────────────────────────────
     # GET readable by apartment members; all writes require is_staff
     path('map/',              include(map_urlpatterns)),
+
+    # ── Commissioning Wizard (Tech Team only — is_staff required on all routes)
+    path('commissioning/',    include(commissioning_urlpatterns)),
 ]
