@@ -34,16 +34,68 @@
 | `<ADMIN_EMAIL>` | __________ | First Django superuser email |
 | `<ADMIN_PASSWORD>` | __________ | First Django superuser password |
 
-> **Where each value is used and how to change it later:**
+> **Where each value is used and how to change it — complete file and line reference:**
 >
-> | Value | Set In | How To Change Later |
+> ---
+>
+> **`<NAS_IP>`** — 5 locations
+>
+> | # | File / Location | Line | Current hardcoded value | Action |
+> |---|---|---|---|---|
+> | 1 | `/volume1/docker/lugh/.env` on NAS | `EXTRA_ALLOWED_HOSTS=` | your NAS IP | `nano /volume1/docker/lugh/.env` → edit that line → then run: `docker compose -f /volume1/docker/lugh/docker-compose.prod.yml restart django` |
+> | 2 | `docker-compose.prod.yml` | 36 | `"192.168.0.192,192.168.0.158,localhost"` | Replace `192.168.0.192` with `<NAS_IP>` → commit and push |
+> | 3 | `PLC_Project/settings.py` | 33 | `"192.168.0.158"` | Replace with `<NAS_IP>` (hardcoded in `ALLOWED_HOSTS`, the env var cannot override it) → commit and push |
+> | 4 | GitHub secret `SERVER_HOST` | (GitHub UI, no file) | old NAS IP | Repo → Settings → Secrets and variables → Actions → `SERVER_HOST` → Update. Used by `.github/workflows/deploy.yml` line 381 for health check. |
+> | 5 | Beckhoff CX ADS route | TwinCAT System Manager (no file) | old NAS IP | On engineering PC: TwinCAT System Manager → connect to CX at `<PLC_IP>` → Routes tab → delete old entry → Add Route: Name=`Lugh-NAS`, AMS Net ID=`<NAS_AMS_NET_ID>`, IP=`<NAS_IP>`, Transport=TCP/IP |
+>
+> ---
+>
+> **`<PLC_IP>`** — 4 locations
+>
+> | # | File / Location | Line | Current hardcoded value | Action |
+> |---|---|---|---|---|
+> | 1 | `/volume1/docker/lugh/.env` on NAS | `PLC_IP=` | old PLC IP | `nano /volume1/docker/lugh/.env` → edit `PLC_IP=<PLC_IP>` → then run: `docker compose -f /volume1/docker/lugh/docker-compose.prod.yml restart django celery-worker` |
+> | 2 | `docker-compose.prod.yml` | 38 | `"192.168.0.161"` | Replace with `<PLC_IP>` → commit and push |
+> | 3 | `PLC_Project/settings.py` | 34 | `"192.168.0.161"` | Replace with `<PLC_IP>` (hardcoded in `ALLOWED_HOSTS`) → commit and push |
+> | 4 | PLCDevice record in database | app UI (no file) | old IP stored in DB | App → Settings → Controllers → tap the device → Edit → update IP field → Save → Test Connection |
+>
+> ---
+>
+> **`<PLC_AMS_NET_ID>`** — 3 locations
+>
+> | # | File / Location | Line | Current hardcoded value | Action |
+> |---|---|---|---|---|
+> | 1 | `/volume1/docker/lugh/.env` on NAS | `PLC_NETID=` | old AMS Net ID | `nano /volume1/docker/lugh/.env` → edit `PLC_NETID=<PLC_AMS_NET_ID>` (always `<PLC_IP>.1.1`) → then run: `docker compose -f /volume1/docker/lugh/docker-compose.prod.yml restart django celery-worker` |
+> | 2 | `docker-compose.prod.yml` | 39 | `"192.168.0.161.1.1"` | Replace with `<PLC_AMS_NET_ID>` → commit and push |
+> | 3 | PLCDevice record in database | app UI (no file) | old AMS Net ID stored in DB | App → Settings → Controllers → tap the device → Edit → update AMS Net ID field → Save → Test Connection |
+>
+> ---
+>
+> **`<LAN_SUBNET>`** — 2 locations
+>
+> | # | File / Location | Line | Current hardcoded value | Action |
+> |---|---|---|---|---|
+> | 1 | `/volume1/docker/lugh/.env` on NAS | `PLC_DISCOVERY_SUBNETS=` | old subnet | `nano /volume1/docker/lugh/.env` → edit `PLC_DISCOVERY_SUBNETS=<LAN_SUBNET>` → then run: `docker compose -f /volume1/docker/lugh/docker-compose.prod.yml restart django` |
+> | 2 | `docker-compose.prod.yml` | 43 | `"192.168.0.0/24"` | Replace with `<LAN_SUBNET>` → commit and push |
+>
+> ---
+>
+> **`<TUNNEL_URL>`** — 2 locations (no file edit — requires app rebuild after secret update)
+>
+> | # | Location | Action |
 > |---|---|---|
-> | `<NAS_IP>` | Firewall rules, `.env` (`EXTRA_ALLOWED_HOSTS`), Nginx health check | Update `.env`, restart `django`; update ADS route on CX |
-> | `<PLC_IP>` | `.env` (`PLC_IP`), commissioning wizard | Update `.env`, restart `django` and `celery-worker`; update PLCDevice via app Settings |
-> | `<PLC_AMS_NET_ID>` | `.env` (`PLC_NETID`), commissioning wizard | Update `.env`, restart `django` and `celery-worker`; update PLCDevice via app Settings |
-> | `<LAN_SUBNET>` | `.env` (`PLC_DISCOVERY_SUBNETS`) | Update `.env`, restart `django` |
-> | `<TUNNEL_URL>` | GitHub secret `LUGH_SERVER_URL` | Update secret → rebuild apps → redistribute APK/IPA |
-> | `<DOCKERHUB_USERNAME>` | `.env`, `docker-compose.prod.yml`, GitHub secret | Update all three locations |
+> | 1 | GitHub secret `LUGH_SERVER_URL` | Run: `gh secret set LUGH_SERVER_URL --body "https://<TUNNEL_DOMAIN>" --repo <GITHUB_REPO>` |
+> | 2 | Baked into APK + IPA at build time | After secret update, push any commit to `main` to trigger rebuild. Download new APK/IPA from GitHub → Actions → latest run → Artifacts → `lugh-android-apk` / `lugh-ios-ipa`. Redistribute to all users — **old apps cannot be redirected without reinstall.** |
+>
+> ---
+>
+> **`<DOCKERHUB_USERNAME>`** — 3 locations
+>
+> | # | File / Location | Line | Action |
+> |---|---|---|---|
+> | 1 | `/volume1/docker/lugh/.env` on NAS | `DOCKERHUB_USERNAME=` | `nano /volume1/docker/lugh/.env` → update → then run: `docker compose -f /volume1/docker/lugh/docker-compose.prod.yml pull && docker compose -f /volume1/docker/lugh/docker-compose.prod.yml up -d` |
+> | 2 | `docker-compose.prod.yml` | 82, 110, 130 | Already reads `${DOCKERHUB_USERNAME}` from `.env` — no edit needed if `.env` is updated |
+> | 3 | GitHub secret `DOCKERHUB_USERNAME` | (GitHub UI) | Repo → Settings → Secrets → `DOCKERHUB_USERNAME` → update. Also regenerate and update `DOCKERHUB_TOKEN` if the Docker Hub account changed. |
 
 ---
 
