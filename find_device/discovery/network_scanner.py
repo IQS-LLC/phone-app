@@ -66,25 +66,25 @@ def _probe_tcp(ip: str, port: int = ADS_ROUTER_PORT, timeout: float = 0.3) -> di
 
 
 def _read_ads_info(ip: str, timeout: float = 1.0) -> dict:
-    """Best-effort ADS device-info read. Never raises — discovery must keep
-    going even if one host answers TCP but rejects the ADS handshake."""
-    try:
-        import pyads
-        with pyads.Connection(ip, pyads.PORT_TC3PLC1, ip) as conn:
-            conn.open()
-            info = conn.read_device_info()
-            ads_state, device_state = conn.read_state()
-            return {
-                "ams_net_id": conn.adapter.net_id if hasattr(conn, "adapter") else f"{ip}.1.1",
-                "device_name": getattr(info, "name", "") or "",
-                "version": f"{getattr(info.version, 'major', 0)}.{getattr(info.version, 'minor', 0)}.{getattr(info.version, 'build', 0)}"
-                    if hasattr(info, "version") else "",
-                "ads_state": int(ads_state),
-                "reachable_ads": True,
-            }
-    except Exception as exc:
-        logger.debug("ADS read failed for %s: %s", ip, exc)
-        return {"ams_net_id": "", "device_name": "", "version": "", "ads_state": -1, "reachable_ads": False}
+    """
+    Placeholder for a real ADS device-info read.
+
+    This deliberately does NOT attempt to open an ADS connection: ADS
+    requires the target's real AMS Net ID, which is never derivable from
+    its IP (confirmed the hard way — see CLAUDE.md's AMS Net ID note and
+    docs/plc_proposals/). Passing a bare IP as ams_net_id raises
+    ValueError inside pyads every time, so the previous version of this
+    function always silently fell back to "unreachable" even for a live
+    PLC, without ever telling the caller why.
+
+    A real fix means implementing Beckhoff's UDP broadcast discovery
+    (port 48899) to learn the AmsNetId, or accepting TCP reachability as
+    the extent of automatic discovery and having the installer enter the
+    real AmsNetId manually (already the documented fallback — see
+    /manage/devices/). Until one of those is built, this just reports
+    "found on the network, identity unknown."
+    """
+    return {"ams_net_id": "", "device_name": "", "version": "", "ads_state": -1, "reachable_ads": False}
 
 
 def scan(subnets: list[str] | None = None, mock: bool | None = None) -> list[dict[str, Any]]:

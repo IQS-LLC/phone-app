@@ -1,0 +1,17 @@
+Add to gvlDALI.TcGVL, inside the existing VAR_GLOBAL block.
+Placement doesn't matter functionally — grouping them together near the
+existing bRelay0-3 declarations is clearest for future readers.
+
+// ── Python/ADS write bridge for wall relay control (proposed) ──────────────
+// Written by the Lugh app over ADS. bPyRelaySetN is a one-shot commit
+// (Python writes TRUE then FALSE ~50ms later); WallLight_POU reacts to its
+// rising edge and copies bPyRelayCmdN into the light's internal state,
+// exactly as a physical wall-switch press would.
+bPyRelayCmd0 : BOOL;   // desired ON/OFF for Light 1
+bPyRelaySet0 : BOOL;   // rising edge commits bPyRelayCmd0
+bPyRelayCmd1 : BOOL;   // desired ON/OFF for Light 2
+bPyRelaySet1 : BOOL;
+bPyRelayCmd2 : BOOL;   // desired ON/OFF for Light 3
+bPyRelaySet2 : BOOL;
+bPyRelayCmd3 : BOOL;   // desired ON/OFF for Light 4
+bPyRelaySet3 : BOOL;

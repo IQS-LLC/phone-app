@@ -26,7 +26,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppConfig {
   static const String serverUrl = String.fromEnvironment(
     'LUGH_SERVER_URL',
-    defaultValue: 'http://192.168.0.158:8000',
+    defaultValue: 'http://192.168.5.191',
   );
 
   static const String prefsKey = 'server_url';

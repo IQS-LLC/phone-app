@@ -53,7 +53,7 @@ class DeviceRegistry:
         self.apartment_id = apartment_id
         mock = os.getenv('PLC_MOCK', 'True').lower() == 'true'
         self._client = ADSClient(
-            netid=os.getenv('PLC_NETID', '5.168.214.75.1.1'),
+            netid=os.getenv('PLC_NETID', '5.168.214.72.1.1'),
             ip   =os.getenv('PLC_IP',    '192.168.0.161'),
             mock =mock,
         )

@@ -36,6 +36,7 @@ class Command(BaseCommand):
                  "Defaults to the seeded 'Apartment 16' (16 DALI channels, "
                  "4 relays, 10 switches) so the dashboard isn't empty.",
         )
+        parser.add_argument("--netid", default="5.168.214.72.1.1", help="AMS Net ID for the PLCDevice.")
 
     def handle(self, *args, **opts):
         username  = opts["username"]
@@ -77,7 +78,7 @@ class Command(BaseCommand):
         dev_created = device.pk is None
         device.apartment  = apartment
         device.ip_address = ip
-        device.ams_net_id = "5.168.214.75.1.1"
+        device.ams_net_id = opts["netid"]
         device.is_active  = True
         device.is_default = True
         device.save()

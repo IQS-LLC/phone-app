@@ -196,16 +196,9 @@ def get_ads_state(request: Request, device_id: int) -> Response:
 
         # Try device info
         try:
-            info = conn.get_device_info()
-            if info:
-                result["device_name"] = getattr(info, "name", dev.name) or dev.name
-                major = getattr(info, "major_version", None)
-                minor = getattr(info, "minor_version", None)
-                build = getattr(info, "version", None)
-                if major is not None and minor is not None:
-                    result["version"] = f"{major}.{minor}"
-                elif build is not None:
-                    result["version"] = str(build)
+            name, version_obj = conn.read_device_info()
+            result["device_name"] = name or dev.name
+            result["version"] = f"{version_obj.version}.{version_obj.revision}.{version_obj.build}"
         except Exception as info_exc:
             logger.debug("get_ads_state: device_info failed: %s", info_exc)
 

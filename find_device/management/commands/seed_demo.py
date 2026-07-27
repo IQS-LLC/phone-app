@@ -11,6 +11,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 
 from django.contrib.auth.models import User
@@ -43,7 +44,19 @@ class Command(BaseCommand):
     help = "Seed a demo environment: one user per role across both apartments."
 
     def add_arguments(self, parser):
-        parser.add_argument("--ip", default="10.0.2.2", help="ip_address for Apartment 16's PLCDevice (mock-safe).")
+        # SEED_APT16_IP / SEED_APT16_NETID let a site-specific .env pin these
+        # without editing the automated startup command — otherwise every
+        # container recreation (which re-runs this command) silently resets
+        # Apartment 16's PLCDevice back to the mock-safe emulator alias.
+        parser.add_argument(
+            "--ip", default=os.getenv("SEED_APT16_IP", "10.0.2.2"),
+            help="ip_address for Apartment 16's PLCDevice (mock-safe).",
+        )
+        parser.add_argument(
+            "--netid", default=os.getenv("SEED_APT16_NETID", "5.168.214.72.1.1"),
+            help="AMS Net ID for Apartment 16's PLCDevice.",
+        )
+        parser.add_argument("--noinput", action="store_true", help="No-op; accepted for compatibility with automated startup commands.")
 
     def handle(self, *args, **opts):
         apartments = {a.name: a for a in Apartment.objects.filter(name__in=["Apartment 16", "Apartment 8"])}
@@ -97,7 +110,7 @@ class Command(BaseCommand):
             apartment=apartments["Apartment 16"],
             defaults=dict(
                 owner=admin, name="Demo PLC",
-                ip_address=opts["ip"], ams_net_id="5.168.214.75.1.1",
+                ip_address=opts["ip"], ams_net_id=opts["netid"],
                 is_active=True, is_default=True,
             ),
         )

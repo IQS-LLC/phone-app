@@ -273,10 +273,10 @@ class NotificationManager:
         """
         attrib = pyads.NotificationAttrib(
             length=ctypes.sizeof(plctype),
-            # ADS timestamps use 100 ns units
-            cycle_time=cycle_ms * 10_000,
-            # max_delay: 100 ms = 1 000 000 × 100 ns
-            max_delay=1_000_000,
+            # NotificationAttrib takes plain milliseconds and converts to
+            # the raw ADS 100ns units internally — do not pre-convert here.
+            cycle_time=cycle_ms,
+            max_delay=100,
         )
         cb = self._make_callback(var_name, plctype)
         handle_pair = self._client._conn.add_device_notification(
@@ -299,14 +299,18 @@ class NotificationManager:
         The returned function is called on the pyads background thread
         and must not raise; exceptions are caught and logged.
         """
-        def cb(notification: pyads.SAdsNotificationHeader, name: str) -> None:
+        def cb(notification, data) -> None:
+            # notification is a ctypes POINTER(SAdsNotificationHeader) — must
+            # deref via .contents. Payload extraction follows pyads' own
+            # documented add_device_notification() example exactly.
             try:
-                timestamp = notification.nTimeStamp
+                contents = notification.contents
+                raw = bytearray(contents.data)[0:contents.cbSampleSize]
                 value_obj = plctype()
                 ctypes.memmove(
                     ctypes.addressof(value_obj),
-                    notification.data,
-                    ctypes.sizeof(plctype),
+                    (ctypes.c_ubyte * len(raw))(*raw),
+                    min(len(raw), ctypes.sizeof(plctype)),
                 )
                 actual_val = (
                     value_obj.value if hasattr(value_obj, "value") else value_obj
@@ -323,8 +327,8 @@ class NotificationManager:
     # documentation completeness; it delegates to the per-variable closure.
     def _notification_callback(
         self,
-        notification: pyads.SAdsNotificationHeader,
-        name: str,
+        notification: "ctypes._Pointer",
+        data: Any,
     ) -> None:  # pragma: no cover
         """
         Generic entry-point (not used directly; each variable gets its own

@@ -149,7 +149,17 @@ class WallRelay:
     Relay-driven wall light (channel 1-16; only 4 physical relays exist
     per apartment — bRelay0-3 / KL2809 — so 1-4 are in use).
 
-    Maps to gvlDALI.aPyWallRelay[N] / aPyWallRelayState[N].
+    Read side: gvlDALI.bRelay{channel-1} — confirmed live on the real PLC
+    (WallLight_POU.TcPOU writes it every scan from internal light state).
+
+    Write side: gvlDALI.bPyRelayCmd{channel-1} / bPyRelaySet{channel-1} —
+    NOT yet present on the real PLC. WallLight_POU currently drives the
+    light exclusively from the physical wall switch (bSwitchOn30-33) and
+    motion sensor (bSensor0-3); there is no command input it reads from
+    Python at all, so writes here will fail with "symbol not found" until
+    the corresponding TwinCAT ST addition (see docs/plc_proposals/) is
+    reviewed and deployed by someone with TwinCAT access. See
+    ADSClient/DeviceRegistry docstrings for the same caveat on DALI.
     """
 
     def __init__(self, channel: int, name: str, room: str, client):
@@ -162,9 +172,11 @@ class WallRelay:
         self._mock_state = False
 
     @property
-    def _var_cmd(self)   -> str: return f'gvlDALI.aPyWallRelay[{self.channel}]'
+    def _var_state(self)    -> str: return f'gvlDALI.bRelay{self.channel - 1}'
     @property
-    def _var_state(self) -> str: return f'gvlDALI.aPyWallRelayState[{self.channel}]'
+    def _var_cmd(self)      -> str: return f'gvlDALI.bPyRelayCmd{self.channel - 1}'
+    @property
+    def _var_cmd_set(self)  -> str: return f'gvlDALI.bPyRelaySet{self.channel - 1}'
 
     # Public alias + decoder — see DaliChannel.batch_var.
     @property
@@ -176,10 +188,14 @@ class WallRelay:
         return bool(raw)
 
     def set_state(self, on: bool):
+        """Requires the pending TwinCAT bPyRelayCmd/bPyRelaySet addition — see class docstring."""
         if self._client.mock:
             self._mock_state = on
             return
         self._client.write(self._var_cmd, on, pyads.PLCTYPE_BOOL)
+        self._client.write(self._var_cmd_set, True,  pyads.PLCTYPE_BOOL)
+        time.sleep(0.05)
+        self._client.write(self._var_cmd_set, False, pyads.PLCTYPE_BOOL)
 
     def read_state(self) -> bool:
         if self._client.mock:

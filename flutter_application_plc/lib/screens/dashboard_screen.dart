@@ -207,6 +207,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                     timeIcon:    _timeIcon(),
                     totalOn:     totalOn,
                     aptId:       _st.state.apartmentId,
+                    apartmentName: widget.authState.apartmentName,
                     breatheAnim: _breatheAnim,
                     appState:    _st,
                   ),
@@ -318,13 +319,14 @@ class _HeroBanner extends StatelessWidget {
   final IconData    timeIcon;
   final int         totalOn;
   final int         aptId;
+  final String?     apartmentName;
   final Animation<double> breatheAnim;
   final AppState    appState;
 
   const _HeroBanner({
     required this.greeting, required this.bgColors, required this.timeIcon,
     required this.totalOn,  required this.aptId,    required this.breatheAnim,
-    required this.appState,
+    required this.appState, this.apartmentName,
   });
 
   @override
@@ -385,7 +387,7 @@ class _HeroBanner extends StatelessWidget {
                   Row(children: [
                     Icon(timeIcon, color: C.accent.withAlpha(150), size: 12),
                     const SizedBox(width: 6),
-                    Text('Apartment $aptId',
+                    Text(apartmentName ?? 'Apartment $aptId',
                         style: AppText.small.copyWith(color: C.textSec)),
                   ]),
                   const SizedBox(height: 10),

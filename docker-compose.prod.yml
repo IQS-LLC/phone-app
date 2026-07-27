@@ -38,6 +38,10 @@ x-django-env: &django-env
     PLC_IP:    "192.168.0.161"
     PLC_NETID: "192.168.0.161.1.1"
     PLC_PORT:  "851"
+    # This NAS's own AMS Net ID — must match the route registered on the CX
+    # (TwinCAT System Manager Routes tab). Without it pyads defaults to an
+    # unroutable local identity and real ADS connections fail on the target.
+    LOCAL_AMS_NET_ID: "192.168.0.158.1.1"
     # Subnets to scan when the installer uses the Commissioning Wizard's
     # "Discover PLCs" step. Comma-separated CIDR notation.
     PLC_DISCOVERY_SUBNETS: "192.168.0.0/24"

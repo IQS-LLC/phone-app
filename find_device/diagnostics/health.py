@@ -244,9 +244,8 @@ class HealthMonitor:
             try:
                 conn = getattr(client, "_conn", None)
                 if conn is not None:
-                    info = conn.get_device_info()
-                    if info:
-                        device_name = getattr(info, "name", device_name) or device_name
+                    name, _version = conn.read_device_info()
+                    device_name = name or device_name
             except Exception:
                 pass  # non-fatal — device_name stays as-is
 

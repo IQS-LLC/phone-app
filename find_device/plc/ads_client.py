@@ -325,17 +325,16 @@ class ADSClient:
                 self._mark_disconnected_and_reconnect(err)
                 return {}
 
-    def write_batch(
-        self,
-        var_value_map: Dict[str, Any],
-        var_type_map:  Dict[str, Any],
-    ):
+    def write_batch(self, var_value_map: Dict[str, Any]):
         """
         Write multiple PLC variables in a single ADS call.
 
         Args:
             var_value_map: ``{"GVL.variable": value, ...}``
-            var_type_map:  ``{"GVL.variable": pyads.PLCTYPE_INT, ...}``
+
+        Note:
+            pyads resolves each variable's ADS type from the symbol table
+            automatically — write_list_by_name takes no explicit type map.
         """
         if self.mock:
             return
@@ -345,7 +344,7 @@ class ADSClient:
                 logger.warning("ADSClient.write_batch: not connected")
                 return
             try:
-                self._conn.write_list_by_name(var_value_map, var_type_map)
+                self._conn.write_list_by_name(var_value_map)
                 self._write_count += len(var_value_map)
             except Exception as exc:
                 err = str(exc)
@@ -377,7 +376,7 @@ class ADSClient:
                 return None
 
             try:
-                handle = self._conn.get_handle_by_name(var_name)
+                handle = self._conn.get_handle(var_name)
                 self._handle_cache[var_name] = handle
                 return handle
             except Exception as exc:
@@ -506,20 +505,16 @@ class ADSClient:
             if not self._ensure_connected():
                 return {"name": "unavailable", "version": "", "major": 0, "minor": 0}
             try:
-                info = self._conn.get_device_info()
-                # info is an AdsDeviceInfo namedtuple-like: .name, .version
-                version_obj = getattr(info, "version", None)
-                if version_obj is not None:
-                    major = getattr(version_obj, "major", 0)
-                    minor = getattr(version_obj, "minor", 0)
-                    build = getattr(version_obj, "build", 0)
-                    version_str = f"{major}.{minor}.{build}"
-                else:
-                    major = minor = 0
-                    version_str = ""
+                # read_device_info() returns (name: str, AdsVersion), not an
+                # object with .name/.version — AdsVersion's fields are
+                # .version (major), .revision (minor), .build.
+                name, version_obj = self._conn.read_device_info()
+                major = version_obj.version
+                minor = version_obj.revision
+                build = version_obj.build
                 return {
-                    "name":    getattr(info, "name", ""),
-                    "version": version_str,
+                    "name":    name or "",
+                    "version": f"{major}.{minor}.{build}",
                     "major":   major,
                     "minor":   minor,
                 }
@@ -614,12 +609,22 @@ class ADSClient:
     # Route management
     # =========================================================================
 
-    def add_route(self, sender_net_id: str, route_name: str = "Lugh") -> bool:
+    def add_route(
+        self,
+        sender_net_id: str,
+        sender_host: str,
+        username: str,
+        password: str,
+        route_name: str = "Lugh",
+    ) -> bool:
         """
         Add an ADS route on the remote target that points back to this host.
 
         Args:
             sender_net_id: AMS Net ID of the sender (this host).
+            sender_host:   Hostname or IP of the sender (this host).
+            username:      Username on the target PLC/embedded OS.
+            password:      Password on the target PLC/embedded OS.
             route_name:    Friendly name for the route entry on the PLC.
 
         Returns:
@@ -630,12 +635,13 @@ class ADSClient:
             return True
 
         try:
-            pyads.add_route_to_target(
+            pyads.add_route_to_plc(
                 sender_net_id,
-                "",          # sender hostname (empty → derived from net id)
-                self.netid,
+                sender_host,
                 self.ip,
-                route_name,
+                username,
+                password,
+                route_name=route_name,
             )
             logger.info(
                 "ADSClient.add_route: added route '%s' on %s", route_name, self.netid
