@@ -284,16 +284,13 @@ class DeviceRegistry:
         dali_levels  = self._batch_read_group(self._dali)
         relay_states = self._batch_read_group(self._relays)
 
-        # Once the PLC connection drops, every remaining individual
-        # dev.read_state() call below would independently re-pay
-        # ADSClient._RECONNECT_COOLDOWN (5s) before failing again. With
-        # up to a dozen+ curtains/switches/sensors, that turns one HTTP
-        # request into a minute-plus block. With WEB_CONCURRENCY=1 and
-        # gunicorn's 30s worker timeout, that gets the sole worker
-        # SIGKILLed — taking the entire app down, not just this request.
-        # So: the moment one read fails, stop attempting further
-        # individual reads for the rest of this call — they'd all fail
-        # the same way until the background reconnect thread succeeds.
+        # ADSClient._ensure_connected() now fails fast (no blocking
+        # reconnect) when disconnected, so this is mostly a fast-path
+        # optimization rather than the timeout-avoidance it used to be —
+        # still worth skipping N pointless calls in one pass. The moment
+        # one read fails, stop attempting further individual reads for the
+        # rest of this call — they'd all fail the same way until the
+        # background reconnect thread succeeds.
         plc_down = (not self._client.mock) and (not self._client.is_connected)
 
         def _read_group(devices: dict, label: str) -> dict:

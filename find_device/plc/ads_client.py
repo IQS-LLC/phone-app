@@ -66,7 +66,6 @@ class ADSClient:
     """
 
     # ── Reconnect parameters ──────────────────────────────────────────────────
-    _RECONNECT_COOLDOWN  = 5.0    # minimum seconds between reconnect attempts
     _reconnect_delay     = 1.0    # initial back-off interval (seconds)
     _reconnect_max_delay = 60.0   # cap on back-off interval
 
@@ -90,7 +89,6 @@ class ADSClient:
 
         # ── State flags ───────────────────────────────────────────────────────
         self._connected       = False
-        self._last_reconnect  = 0.0        # monotonic timestamp (legacy cooldown)
         self._connected_since: Optional[float] = None   # monotonic
 
         # ── Health counters ───────────────────────────────────────────────────
@@ -119,34 +117,47 @@ class ADSClient:
     # =========================================================================
 
     def connect(self) -> bool:
-        """Open the ADS connection.  Returns True on success or in mock mode."""
+        """
+        Open the ADS connection.  Returns True on success or in mock mode.
+
+        Deliberately does NOT hold self._lock across the network I/O below
+        (which can take 5-10s+ per attempt against a slow/unreachable
+        target) — read()/write()/read_batch() all acquire that same lock
+        just to check "are we connected", and this method runs on the
+        background reconnect thread while those run on request threads.
+        Holding the lock here would block every other request for the
+        full duration of one reconnect attempt — exactly the stall the
+        background thread exists to avoid causing. Only the brief instant
+        of publishing a verified connection (in _open_and_verify) is
+        locked.
+        """
         if self.mock:
             self._connected       = True
             self._connected_since = time.monotonic()
             logger.info("ADSClient: mock mode – no real PLC connection")
             return True
 
-        with self._lock:
-            if self._connected:
-                return True
+        if self._connected:
+            return True
+        if self._open_and_verify():
+            return True
+
+        # open()/read_state() failed — this is exactly the symptom of a
+        # target that no longer has a route for this host (TwinCAT
+        # rebuilt/reactivated and reset its route table). Try to
+        # re-register automatically and retry once before giving up.
+        if self._try_auto_route_repair():
             if self._open_and_verify():
+                logger.info(
+                    "ADSClient: connected after automatic route repair  "
+                    "netid=%s  ip=%s", self.netid, self.ip,
+                )
                 return True
 
-            # open()/read_state() failed — this is exactly the symptom of a
-            # target that no longer has a route for this host (TwinCAT
-            # rebuilt/reactivated and reset its route table). Try to
-            # re-register automatically and retry once before giving up.
-            if self._try_auto_route_repair():
-                if self._open_and_verify():
-                    logger.info(
-                        "ADSClient: connected after automatic route repair  "
-                        "netid=%s  ip=%s", self.netid, self.ip,
-                    )
-                    return True
-
+        with self._lock:
             self._conn      = None
             self._connected = False
-            return False
+        return False
 
     def _open_and_verify(self) -> bool:
         """
@@ -158,15 +169,17 @@ class ADSClient:
         is that real command, so _connected only ever reflects a
         connection that has actually proven it works.
 
-        Must be called with self._lock held.
+        The slow part (open + read_state) runs without self._lock held —
+        see connect(). Only the final publish step is locked.
         """
         try:
             conn = pyads.Connection(self.netid, pyads.PORT_TC3PLC1, self.ip)
             conn.open()
             conn.read_state()
-            self._conn            = conn
-            self._connected        = True
-            self._connected_since  = time.monotonic()
+            with self._lock:
+                self._conn            = conn
+                self._connected        = True
+                self._connected_since  = time.monotonic()
             logger.info(
                 "ADSClient: connected  netid=%s  ip=%s", self.netid, self.ip
             )
@@ -240,20 +253,25 @@ class ADSClient:
 
     # ── Legacy synchronous reconnect (kept for backward compat) ──────────────
 
-    def _attempt_reconnect(self) -> bool:
-        """Legacy single-attempt reconnect with cooldown guard."""
-        now = time.monotonic()
-        if now - self._last_reconnect < self._RECONNECT_COOLDOWN:
-            return False
-        self._last_reconnect = now
-        logger.warning("ADSClient: attempting reconnect …")
-        self.disconnect()
-        return self.connect()
-
     def _ensure_connected(self) -> bool:
+        """
+        Returns True only if already connected — never blocks.
+
+        This used to fall through to a synchronous reconnect attempt here
+        (full ADS connect + optional route repair, 5-25s when the target is
+        slow/unreachable) run inline on whatever thread called read/write.
+        With WEB_CONCURRENCY=1, that blocked the sole gunicorn worker for
+        every other request — including simple health checks — for the
+        entire duration of one device's reconnect attempt. Reconnection is
+        already handled asynchronously by the background reconnect thread
+        (see _reconnect_loop); this just makes sure that thread is running
+        and reports "not connected" immediately instead of also trying to
+        connect synchronously on the caller's thread.
+        """
         if self._connected:
             return True
-        return self._attempt_reconnect()
+        self._launch_reconnect_thread()
+        return False
 
     # ── Background auto-reconnect ─────────────────────────────────────────────
 
