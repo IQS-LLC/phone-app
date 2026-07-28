@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 import time
 from collections import deque
@@ -69,6 +70,16 @@ class ADSClient:
     _reconnect_delay     = 1.0    # initial back-off interval (seconds)
     _reconnect_max_delay = 60.0   # cap on back-off interval
 
+    # ── Auto route-repair ─────────────────────────────────────────────────────
+    # TwinCAT engineering sessions (project rebuild/reactivate/redownload)
+    # can reset the target's AMS route table, silently dropping whatever
+    # route lets this host talk to it. Rather than requiring someone to
+    # notice and re-run add_route_to_plc by hand, connect() does it
+    # automatically on failure — gated by a cooldown so a persistently
+    # unreachable target doesn't get hammered with route-add attempts.
+    _ROUTE_REPAIR_COOLDOWN = 15.0
+    _last_route_repair_attempt = 0.0
+
     def __init__(self, netid: str, ip: str, mock: bool = False):
         self.netid = netid
         self.ip    = ip
@@ -118,23 +129,95 @@ class ADSClient:
         with self._lock:
             if self._connected:
                 return True
-            try:
-                self._conn = pyads.Connection(
-                    self.netid, pyads.PORT_TC3PLC1, self.ip
-                )
-                self._conn.open()
-                self._connected       = True
-                self._connected_since = time.monotonic()
-                logger.info(
-                    "ADSClient: connected  netid=%s  ip=%s", self.netid, self.ip
-                )
+            if self._open_and_verify():
                 return True
-            except Exception as exc:
-                self._conn      = None
-                self._connected = False
-                self._record_error(str(exc))
-                logger.error("ADSClient: connect failed: %s", exc)
-                return False
+
+            # open()/read_state() failed — this is exactly the symptom of a
+            # target that no longer has a route for this host (TwinCAT
+            # rebuilt/reactivated and reset its route table). Try to
+            # re-register automatically and retry once before giving up.
+            if self._try_auto_route_repair():
+                if self._open_and_verify():
+                    logger.info(
+                        "ADSClient: connected after automatic route repair  "
+                        "netid=%s  ip=%s", self.netid, self.ip,
+                    )
+                    return True
+
+            self._conn      = None
+            self._connected = False
+            return False
+
+    def _open_and_verify(self) -> bool:
+        """
+        Open a pyads.Connection and confirm it's actually usable.
+
+        pyads' open() can succeed at the raw TCP level even when the
+        target's AMS router doesn't recognize this sender — the failure
+        only shows up on the first real ADS command. read_state() here
+        is that real command, so _connected only ever reflects a
+        connection that has actually proven it works.
+
+        Must be called with self._lock held.
+        """
+        try:
+            conn = pyads.Connection(self.netid, pyads.PORT_TC3PLC1, self.ip)
+            conn.open()
+            conn.read_state()
+            self._conn            = conn
+            self._connected        = True
+            self._connected_since  = time.monotonic()
+            logger.info(
+                "ADSClient: connected  netid=%s  ip=%s", self.netid, self.ip
+            )
+            return True
+        except Exception as exc:
+            self._record_error(str(exc))
+            logger.error("ADSClient: connect failed: %s", exc)
+            return False
+
+    def _try_auto_route_repair(self) -> bool:
+        """
+        Re-register this host's AMS route on the target via the same
+        mechanism TwinCAT's own "Add Route" dialog uses, using credentials
+        from PLC_ROUTE_USERNAME/PLC_ROUTE_PASSWORD.
+
+        Gated by _ROUTE_REPAIR_COOLDOWN so a target that's genuinely down
+        (not just missing a route) doesn't get hammered with route-add
+        attempts on every reconnect cycle.
+
+        Must be called with self._lock held.
+        """
+        now = time.monotonic()
+        if now - self._last_route_repair_attempt < self._ROUTE_REPAIR_COOLDOWN:
+            return False
+        self._last_route_repair_attempt = now
+
+        username     = os.getenv("PLC_ROUTE_USERNAME")
+        password     = os.getenv("PLC_ROUTE_PASSWORD")
+        local_netid  = os.getenv("LOCAL_AMS_NET_ID")
+        local_host   = os.getenv("LOCAL_AMS_HOST")
+        if not (username and password and local_netid and local_host):
+            logger.debug(
+                "ADSClient: auto route repair skipped — "
+                "PLC_ROUTE_USERNAME/PLC_ROUTE_PASSWORD/LOCAL_AMS_NET_ID/"
+                "LOCAL_AMS_HOST not fully configured"
+            )
+            return False
+
+        try:
+            pyads.add_route_to_plc(
+                local_netid, local_host, self.ip, username, password,
+                route_name="Lugh-NAS-auto",
+            )
+            logger.warning(
+                "ADSClient: auto-repaired AMS route on %s for %s "
+                "(target likely reset its route table)", self.ip, local_netid,
+            )
+            return True
+        except Exception as exc:
+            logger.error("ADSClient: auto route repair failed: %s", exc)
+            return False
 
     def disconnect(self):
         """Close the ADS connection and release all handles."""

@@ -83,32 +83,47 @@ def byte_to_pct(b: int) -> int:
 
 class DaliChannel:
     """
-    Single Tridonic DALI dimmer channel. The DALI bus driven by POU.TcPOU
-    supports addresses 1-28 (28 fbDALI102DimmerNSwitch instances); 1-16 are
-    currently provisioned in ApartmentDevice rows, but the class itself
-    must accept the full hardware range so adding channel 17-28 later is a
-    DB row, not a code change.
+    Single Tridonic DALI dimmer channel, one per fbDALI102DimmerNSwitch
+    instance in POU.TcPOU (real instance numbers: 1-28, 30, 31 — 29 was
+    never declared, skip it; 30/31 are motion-sensor-only with no on/off
+    command path, see turn_on() note below).
+
+    gvlDALI.aPyDaliLevel/aPyDaliSetLevel/aPyDaliOn/aPyDaliActual[N] do NOT
+    currently exist on the real PLC. They were added once (additive CFC
+    rewiring — see docs/plc_proposals/dali_dimmer_control.md), built, and
+    downloaded — but wiring bOn into 28 previously-unconnected FB inputs
+    fought with the existing switch/motion-sensor logic and broke
+    switch-driven lighting building-wide. The PLC side was fully reverted;
+    every read/write below will fail with ADSError symbol-not-found until
+    a safer per-channel wiring is designed, applied, and physically
+    verified before being trusted. Registry-level per-device error bounding
+    means this fails a single channel, not the whole request.
     """
 
-    MAX_CHANNEL = 28
+    MAX_CHANNEL = 31
+    _MISSING_CHANNEL = 29  # never declared in POU.TcPOU
+    _MOTION_ONLY_CHANNELS = (30, 31)  # no bOn wiring — turn_on() is a no-op there
 
     def __init__(self, channel: int, name: str, room: str, client,
                  apartment_device_id: int = 0):
-        if not 1 <= channel <= self.MAX_CHANNEL:
-            raise ValueError(f"DALI channel must be 1-{self.MAX_CHANNEL}, got {channel}")
+        if not 1 <= channel <= self.MAX_CHANNEL or channel == self._MISSING_CHANNEL:
+            raise ValueError(f"DALI channel must be 1-{self.MAX_CHANNEL} (excluding {self._MISSING_CHANNEL}), got {channel}")
         self.channel              = channel
         self.name                 = name
         self.room                 = room
         self.apartment_device_id  = apartment_device_id
         self._client              = client
         self._mock_level          = 0
+        self._mock_on              = False
 
     @property
-    def _var_level(self)     -> str: return f'gvlDALI.aPyLevel[{self.channel}]'
+    def _var_level(self)     -> str: return f'gvlDALI.aPyDaliLevel[{self.channel}]'
     @property
-    def _var_set_level(self) -> str: return f'gvlDALI.aPySetLevel[{self.channel}]'
+    def _var_set_level(self) -> str: return f'gvlDALI.aPyDaliSetLevel[{self.channel}]'
     @property
-    def _var_actual(self)    -> str: return f'gvlDALI.aPyActualLevel[{self.channel}]'
+    def _var_on(self)        -> str: return f'gvlDALI.aPyDaliOn[{self.channel}]'
+    @property
+    def _var_actual(self)    -> str: return f'gvlDALI.aPyDaliActual[{self.channel}]'
 
     # Public alias + decoder so DeviceRegistry can fold this var into a
     # single ADS sum-read (read_list_by_name) across every DALI channel
@@ -130,6 +145,21 @@ class DaliChannel:
         self._client.write(self._var_set_level, True,  pyads.PLCTYPE_BOOL)
         time.sleep(0.05)
         self._client.write(self._var_set_level, False, pyads.PLCTYPE_BOOL)
+
+    def turn_on(self):
+        """
+        Rising-edge "on" trigger — mirrors how the physical wall switch
+        (bSwitch) already drives this same FB input for channels 1-28.
+        No-op on 30/31 (motion-sensor-only, no bOn wiring exists for them).
+        """
+        if self._client.mock:
+            self._mock_on = True
+            return
+        if self.channel in self._MOTION_ONLY_CHANNELS:
+            return
+        self._client.write(self._var_on, True,  pyads.PLCTYPE_BOOL)
+        time.sleep(0.05)
+        self._client.write(self._var_on, False, pyads.PLCTYPE_BOOL)
 
     def read_actual_level(self) -> int:
         if self._client.mock:
@@ -210,7 +240,13 @@ class WallRelay:
 # ── SwitchInput ───────────────────────────────────────────────────────────────
 
 class SwitchInput:
-    """BTicino L4036 push-button input (index 1-48, KL1809 terminals)."""
+    """
+    Physical wall switch input (index 1-33 wired for real — gvlDALI.bSwitchOn1
+    through bSwitchOn33, confirmed live on the real PLC; index up to 48
+    accepted for future hardware). Index 30-33 are also read directly by
+    WallLight_POU as the 4 relay-light toggle buttons — this class just
+    reads the same raw input, it doesn't change what the PLC does with it.
+    """
 
     def __init__(self, index: int, name: str, room: str, client):
         if not 1 <= index <= 48:
@@ -222,7 +258,7 @@ class SwitchInput:
         self._mock_state = False
 
     @property
-    def _var(self) -> str: return f'gvlDALI.aPySwitchState[{self.index}]'
+    def _var(self) -> str: return f'gvlDALI.bSwitchOn{self.index}'
 
     def read_state(self) -> bool:
         if self._client.mock:
@@ -367,7 +403,12 @@ class MagneticSensor:
 # ── MotionSensor ──────────────────────────────────────────────────────────────
 
 class MotionSensor:
-    """PIR / presence sensor (index 1-8). Maps to gvlIO.aPyMotionSensor[N]."""
+    """
+    PIR / presence sensor (index 1-8; only 1-4 have real backing hardware
+    today — gvlDALI.bSensor0-3, confirmed live on the real PLC and read
+    directly by WallLight_POU / POU_GUEST_Bathroom for auto-on lighting.
+    Indices 5-8 accepted for future hardware but have no real variable yet.
+    """
 
     def __init__(self, index: int, name: str, room: str, client):
         if not 1 <= index <= 8:
@@ -379,7 +420,7 @@ class MotionSensor:
         self._mock_state = False
 
     @property
-    def _var(self) -> str: return f'gvlIO.aPyMotionSensor[{self.index}]'
+    def _var(self) -> str: return f'gvlDALI.bSensor{self.index - 1}'
 
     def read_state(self) -> bool:
         if self._client.mock:

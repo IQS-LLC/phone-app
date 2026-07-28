@@ -106,12 +106,19 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"{ADMIN_USERNAME} -> membership on every apartment"))
 
         # PLCDevice for Apartment 16 so it's immediately controllable.
+        # is_active is deliberately left out of `defaults` when the row
+        # already exists: an operator may set it False to stop Celery's 2s
+        # poll from hammering a PLC that's mid-rebuild/offline, and this
+        # command re-runs on every dev-stack startup — it must not silently
+        # undo that override every time.
+        existing = PLCDevice.objects.filter(apartment=apartments["Apartment 16"]).first()
         device, _ = PLCDevice.objects.update_or_create(
             apartment=apartments["Apartment 16"],
             defaults=dict(
                 owner=admin, name="Demo PLC",
                 ip_address=opts["ip"], ams_net_id=opts["netid"],
-                is_active=True, is_default=True,
+                is_active=existing.is_active if existing else True,
+                is_default=True,
             ),
         )
 

@@ -1,9 +1,25 @@
-# Proposed TwinCAT change: app control of the 4 wall relays (Apartment 16)
+# Proposed TwinCAT changes for real app control (Apartment 16)
 
-**Status: proposal only. Nothing here has been applied to the real CX8190.**
-Everything in this folder is a suggested addition for someone with TwinCAT
-System Manager / XAE access (and authority to touch this live building
-controller) to review, apply, build, and download themselves.
+**Status: this wall-relay change (and the related DALI one) was applied,
+built, and downloaded to the real CX8190 — and has since been reverted.**
+The DALI proposal's `bOn` wiring (see `dali_dimmer_control.md`) broke
+switch-driven lighting building-wide once live; all four touched PLC
+source files, including this proposal's `WallLight_POU.TcPOU` /
+`POU_GUEST_Bathroom.TcPOU` additions, were reverted together as a single
+recovery action rather than surgically un-doing only the DALI piece. That
+means the wall-relay change described below is currently *also* reverted
+and *also* unverified on its own — it was never independently confirmed
+safe in isolation before the DALI change was layered on top and broke
+things. Re-apply and physically test this one alone, separately from any
+DALI change, before trusting it again.
+
+Two proposals, same root cause, same shape:
+- **This file** — the 4 wall relays. Small, 4 channels, do this one first.
+- **`dali_dimmer_control.md`** — the 30 DALI dimmer channels. Same fix
+  pattern, bigger blast radius (30 channels instead of 4) — do this after
+  the relay proposal is re-deployed and confirmed working on its own.
+
+## Why (wall relays)
 
 ## Why
 
@@ -50,11 +66,14 @@ and the app's command is just another way to flip the same internal state.
    "documented as pending" to "expected to work" and re-verify end-to-end
    against the real device.
 
-## Why I didn't do this myself
+## What actually happened when this was applied
 
 Building and downloading new PLC logic to a live CX8190 restarts its PLC
 task and directly changes how real lights/relays in an occupied apartment
-behave. That crosses into "requires the physical environment and a human
-who owns that risk" — I can propose and verify the software side, but not
-push new control logic to live building hardware without you (or whoever
-owns this PLC) reviewing and deploying it.
+behave. That risk was explicitly accepted and this was applied directly —
+the relay wiring above plus the DALI `bOn` wiring in the same
+build/download. The DALI half broke switch-driven lighting building-wide;
+everything was reverted together. Lesson for next time: apply and
+physically verify wall-relay-scale (4 channel) and DALI-scale (30 channel)
+changes as two separate build/download/test cycles, not one — a problem in
+either one currently forces reverting both.

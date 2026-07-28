@@ -51,7 +51,7 @@ class DeviceRegistry:
 
     def __init__(self, apartment_id: int):
         self.apartment_id = apartment_id
-        mock = os.getenv('PLC_MOCK', 'True').lower() == 'true'
+        mock = os.getenv('PLC_MOCK', 'False').lower() == 'true'
         self._client = ADSClient(
             netid=os.getenv('PLC_NETID', '5.168.214.72.1.1'),
             ip   =os.getenv('PLC_IP',    '192.168.0.161'),
@@ -78,6 +78,7 @@ class DeviceRegistry:
         from django.apps import apps
         Apartment       = apps.get_model('find_device', 'Apartment')
         ApartmentDevice = apps.get_model('find_device', 'ApartmentDevice')
+        PLCDevice       = apps.get_model('find_device', 'PLCDevice')
 
         apartment = Apartment.objects.filter(pk=self.apartment_id).first()
         if apartment is None:
@@ -86,12 +87,24 @@ class DeviceRegistry:
                 "registry will start with zero devices.", self.apartment_id,
             )
 
-        # ADS connection target comes from this apartment's own PLCDevice —
-        # never a global "is_default" lookup across every user's devices.
-        # PLC_MOCK=True in env always wins (safe for dev/CI).
+        # ADS connection target comes from this apartment's own PLCDevice;
+        # apartments without one yet (no real hardware commissioned) fall
+        # back to the one PLCDevice marked is_default, so every user is
+        # controlling the same real CX for now, until each apartment gets
+        # its own commissioned hardware.
+        #
+        # is_active only gates Celery's background poll (tasks.py) — it is
+        # NOT checked here. An on-demand request from the app must always
+        # be attempted against the real device; background polling being
+        # paused for this apartment is a separate, unrelated concern.
+        #
+        # No mock fallback: PLC_MOCK is an explicit opt-in for automated
+        # tests only (default off). A real apartment's connection attempt
+        # that fails stays failed and is reported as such — never silently
+        # replaced with fake data.
         if not self._client.mock and apartment is not None:
-            device = getattr(apartment, 'plc_device', None)
-            if device is not None and device.is_active:
+            device = getattr(apartment, 'plc_device', None) or PLCDevice.objects.filter(is_default=True).first()
+            if device is not None:
                 self._client.netid = device.ams_net_id
                 self._client.ip    = device.ip_address
                 logger.info(
@@ -101,19 +114,18 @@ class DeviceRegistry:
                 )
             else:
                 logger.warning(
-                    "DeviceRegistry[apt%s]: no PLCDevice registered for "
-                    "this apartment yet — install it via the installer "
-                    "workflow before going off mock.", self.apartment_id,
+                    "DeviceRegistry[apt%s]: no PLCDevice exists anywhere yet — "
+                    "install one via the installer workflow.", self.apartment_id,
                 )
 
         ok = self._client.connect()
-        if not ok and not self._client.mock:
-            logger.warning(
-                "DeviceRegistry[apt%s]: PLC unreachable — falling back to mock",
-                self.apartment_id,
+        if not ok:
+            logger.error(
+                "DeviceRegistry[apt%s]: real PLC unreachable at %s (%s) — "
+                "no mock fallback; this apartment has no live data until "
+                "the connection recovers.",
+                self.apartment_id, self._client.ip, self._client.netid,
             )
-            self._client.mock = True
-            self._client.connect()
 
         if apartment is not None:
             for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
@@ -272,51 +284,39 @@ class DeviceRegistry:
         dali_levels  = self._batch_read_group(self._dali)
         relay_states = self._batch_read_group(self._relays)
 
-        curtain_states = {}
-        switch_states, appliance_states = {}, {}
-        door_states, window_states, motion_states = {}, {}, {}
+        # Once the PLC connection drops, every remaining individual
+        # dev.read_state() call below would independently re-pay
+        # ADSClient._RECONNECT_COOLDOWN (5s) before failing again. With
+        # up to a dozen+ curtains/switches/sensors, that turns one HTTP
+        # request into a minute-plus block. With WEB_CONCURRENCY=1 and
+        # gunicorn's 30s worker timeout, that gets the sole worker
+        # SIGKILLed — taking the entire app down, not just this request.
+        # So: the moment one read fails, stop attempting further
+        # individual reads for the rest of this call — they'd all fail
+        # the same way until the background reconnect thread succeeds.
+        plc_down = (not self._client.mock) and (not self._client.is_connected)
 
-        for idx, dev in self._curtains.items():
-            try:
-                curtain_states[idx] = dev.read_state()
-            except Exception as exc:
-                logger.error("Curtain %d read: %s", idx, exc)
-                curtain_states[idx] = None
+        def _read_group(devices: dict, label: str) -> dict:
+            nonlocal plc_down
+            out = {}
+            for idx, dev in devices.items():
+                if plc_down:
+                    out[idx] = None
+                    continue
+                try:
+                    out[idx] = dev.read_state()
+                except Exception as exc:
+                    logger.error("%s %s read: %s", label, idx, exc)
+                    out[idx] = None
+                    plc_down = True
+            return out
 
-        for idx, dev in self._switches.items():
-            try:
-                switch_states[idx] = dev.read_state()
-            except Exception as exc:
-                logger.error("Switch %d read: %s", idx, exc)
-                switch_states[idx] = None
-
-        for idx, dev in self._door_sensors.items():
-            try:
-                door_states[idx] = dev.read_state()
-            except Exception as exc:
-                logger.error("Door sensor %d read: %s", idx, exc)
-                door_states[idx] = None
-
-        for idx, dev in self._window_sensors.items():
-            try:
-                window_states[idx] = dev.read_state()
-            except Exception as exc:
-                logger.error("Window sensor %d read: %s", idx, exc)
-                window_states[idx] = None
-
-        for idx, dev in self._motion_sensors.items():
-            try:
-                motion_states[idx] = dev.read_state()
-            except Exception as exc:
-                logger.error("Motion sensor %d read: %s", idx, exc)
-                motion_states[idx] = None
-
-        for name, dev in self._appliances.items():
-            try:
-                appliance_states[name] = dev.read_state()
-            except Exception as exc:
-                logger.error("Appliance %s read: %s", name, exc)
-                appliance_states[name] = None
+        curtain_states   = _read_group(self._curtains, "Curtain")
+        switch_states     = _read_group(self._switches, "Switch")
+        door_states        = _read_group(self._door_sensors, "Door sensor")
+        window_states      = _read_group(self._window_sensors, "Window sensor")
+        motion_states      = _read_group(self._motion_sensors, "Motion sensor")
+        appliance_states   = _read_group(self._appliances, "Appliance")
 
         security_state = {}
         if self._security:

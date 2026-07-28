@@ -162,7 +162,11 @@ class _DashboardScreenState extends State<DashboardScreen>
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: _st,
+      // Merged with authState: the hero banner reads widget.authState.apartmentName
+      // below, which arrives asynchronously after login (_loadPermissions()) —
+      // listening to _st alone left it stuck on the "Apartment {id}" fallback
+      // until AppState happened to notify for an unrelated reason.
+      listenable: Listenable.merge([_st, widget.authState]),
       builder: (_, _) {
         final rooms      = _st.rooms;
         final totalOn    = _totalLightsOn;

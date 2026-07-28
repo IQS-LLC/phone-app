@@ -29,7 +29,7 @@ class FindDeviceConfig(AppConfig):
         this matches whatever identity was registered on the CX (via
         TwinCAT System Manager or ADSClient.add_route).
         """
-        if os.getenv('PLC_MOCK', 'True').lower() == 'true':
+        if os.getenv('PLC_MOCK', 'False').lower() == 'true':
             return
         local_net_id = os.getenv('LOCAL_AMS_NET_ID')
         if not local_net_id:

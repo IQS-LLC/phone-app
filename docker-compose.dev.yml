@@ -1,5 +1,6 @@
 # Lugh Platform — Full development stack
-# Includes: PostgreSQL, Redis, Django, Mock PLC, Celery Worker, Celery Beat, Nginx
+# Includes: PostgreSQL, Redis, Django, Celery Worker, Celery Beat, Nginx
+# No mock PLC — every apartment connects to the real CX over ADS.
 #
 # Usage:
 #   docker compose -f docker-compose.dev.yml up --build
@@ -46,29 +47,6 @@ services:
     ports:
       - "6379:6379"
 
-  # ── Mock PLC (Beckhoff CX emulator) ─────────────────────────────────────────
-  mock-plc:
-    build:
-      context: infra/docker/mock-plc
-      dockerfile: Dockerfile
-    container_name: lugh_mock_plc
-    restart: unless-stopped
-    environment:
-      ADS_PORT:       48898
-      HTTP_PORT:      8080
-      DALI_CHANNELS:  28
-      RELAY_CHANNELS: 4
-    networks:
-      - lugh_net
-    healthcheck:
-      test:     ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
-      interval: 10s
-      timeout:  5s
-      retries:  5
-    ports:
-      - "48898:48898"
-      - "8080:8080"
-
   # ── Django (dev — auto-reload, SQLite-level DEBUG) ───────────────────────────
   django:
     build:
@@ -95,8 +73,6 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      mock-plc:
         condition: service_healthy
     networks:
       - lugh_net

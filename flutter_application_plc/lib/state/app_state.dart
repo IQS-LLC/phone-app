@@ -105,6 +105,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _poller;
   bool   _initializedDevices = false;
   bool   _paused             = false;
+  // Guards against overlapping _poll() calls: a single getState() can take
+  // 15-25s when the PLC is timing out, but the timer still fires every 2s
+  // (or 6s backed off) regardless — without this, each tick starts a new
+  // request on top of ones still in flight, unboundedly.
+  bool   _polling            = false;
 
   static const _fastInterval = Duration(seconds: 2);
 
@@ -215,37 +220,43 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // ── Polling ────────────────────────────────────────────────────────────────
 
   Future<void> _poll() async {
-    final result       = await _api.getState();
-    final wasConnected = _connected;
-    _connecting        = false;
-    _lastLatencyMs     = result.latencyMs;
-    _connected         = result.success;
+    if (_polling) return;
+    _polling = true;
+    try {
+      final result       = await _api.getState();
+      final wasConnected = _connected;
+      _connecting        = false;
+      _lastLatencyMs     = result.latencyMs;
+      _connected         = result.success;
 
-    if (!wasConnected && _connected) {
-      _failStreak = 0;
-      _addLog('Connected  (${result.latencyMs}ms)');
+      if (!wasConnected && _connected) {
+        _failStreak = 0;
+        _addLog('Connected  (${result.latencyMs}ms)');
+      }
+      if (wasConnected && !_connected) {
+        _addLog('Connection lost', isError: true);
+      }
+
+      _failStreak = _connected ? 0 : _failStreak + 1;
+
+      if (result.success && result.data != null) {
+        _state = SystemState.fromJson(result.data!);
+
+        // Clear optimistic updates that the server has confirmed
+        _pendingBrightness.removeWhere((ch, pct) => _state.dali[ch] == pct);
+        _pendingRelay.removeWhere((ch, on) => _state.relays[ch] == on);
+        _pendingCurtain.removeWhere((idx, cmd) => _state.curtains[idx] == cmd);
+        _pendingAppliance.removeWhere((name, on) => _state.appliances[name] == on);
+        if (_pendingAlarm    != null && _state.security.armed    == _pendingAlarm!)    _pendingAlarm    = null;
+        if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
+      }
+
+      if (_connected && !_initializedDevices) await _loadDevices();
+
+      notifyListeners();
+    } finally {
+      _polling = false;
     }
-    if (wasConnected && !_connected) {
-      _addLog('Connection lost', isError: true);
-    }
-
-    _failStreak = _connected ? 0 : _failStreak + 1;
-
-    if (result.success && result.data != null) {
-      _state = SystemState.fromJson(result.data!);
-
-      // Clear optimistic updates that the server has confirmed
-      _pendingBrightness.removeWhere((ch, pct) => _state.dali[ch] == pct);
-      _pendingRelay.removeWhere((ch, on) => _state.relays[ch] == on);
-      _pendingCurtain.removeWhere((idx, cmd) => _state.curtains[idx] == cmd);
-      _pendingAppliance.removeWhere((name, on) => _state.appliances[name] == on);
-      if (_pendingAlarm    != null && _state.security.armed    == _pendingAlarm!)    _pendingAlarm    = null;
-      if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
-    }
-
-    if (_connected && !_initializedDevices) await _loadDevices();
-
-    notifyListeners();
   }
 
   Future<void> _loadDevices() async {
