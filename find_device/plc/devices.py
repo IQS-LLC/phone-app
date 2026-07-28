@@ -85,23 +85,24 @@ class DaliChannel:
     """
     Single Tridonic DALI dimmer channel, one per fbDALI102DimmerNSwitch
     instance in POU.TcPOU (real instance numbers: 1-28, 30, 31 — 29 was
-    never declared, skip it).
+    never declared, skip it; 30/31 are motion-sensor-only with no on/off
+    command path, see turn_on() note below).
 
-    gvlController.aDaliLevel/aDaliSetLevel/aDaliActual[N] — deployed to a
-    new, isolated gvlController.TcGVL + POU_Controller.TcPOU (see
-    docs/plc_proposals/dali_dimmer_control.md), built, and downloaded.
-    Deliberately does NOT wire bOn: an earlier attempt wired bOn into 28
-    previously-unconnected FB inputs and that fought with the existing
-    switch/motion-sensor logic, breaking switch-driven lighting
-    building-wide. This time on/off is expressed purely through level
-    (0 = off, >0 = on) via the same bSetLevel/nLevel pins already used for
-    dimming — bOn/bOff are untouched on every instance, including 30/31
-    where they're wired to a motion sensor.
+    gvlDALI.aPyDaliLevel/aPyDaliSetLevel/aPyDaliOn/aPyDaliActual[N] do NOT
+    currently exist on the real PLC. They were added once (additive CFC
+    rewiring — see docs/plc_proposals/dali_dimmer_control.md), built, and
+    downloaded — but wiring bOn into 28 previously-unconnected FB inputs
+    fought with the existing switch/motion-sensor logic and broke
+    switch-driven lighting building-wide. The PLC side was fully reverted;
+    every read/write below will fail with ADSError symbol-not-found until
+    a safer per-channel wiring is designed, applied, and physically
+    verified before being trusted. Registry-level per-device error bounding
+    means this fails a single channel, not the whole request.
     """
 
     MAX_CHANNEL = 31
     _MISSING_CHANNEL = 29  # never declared in POU.TcPOU
-    _DEFAULT_ON_PERCENT = 100  # turn_on() with no remembered level goes here
+    _MOTION_ONLY_CHANNELS = (30, 31)  # no bOn wiring — turn_on() is a no-op there
 
     def __init__(self, channel: int, name: str, room: str, client,
                  apartment_device_id: int = 0):
@@ -113,13 +114,16 @@ class DaliChannel:
         self.apartment_device_id  = apartment_device_id
         self._client              = client
         self._mock_level          = 0
+        self._mock_on              = False
 
     @property
-    def _var_level(self)     -> str: return f'gvlController.aDaliLevel[{self.channel}]'
+    def _var_level(self)     -> str: return f'gvlDALI.aPyDaliLevel[{self.channel}]'
     @property
-    def _var_set_level(self) -> str: return f'gvlController.aDaliSetLevel[{self.channel}]'
+    def _var_set_level(self) -> str: return f'gvlDALI.aPyDaliSetLevel[{self.channel}]'
     @property
-    def _var_actual(self)    -> str: return f'gvlController.aDaliActual[{self.channel}]'
+    def _var_on(self)        -> str: return f'gvlDALI.aPyDaliOn[{self.channel}]'
+    @property
+    def _var_actual(self)    -> str: return f'gvlDALI.aPyDaliActual[{self.channel}]'
 
     # Public alias + decoder so DeviceRegistry can fold this var into a
     # single ADS sum-read (read_list_by_name) across every DALI channel
@@ -143,12 +147,19 @@ class DaliChannel:
         self._client.write(self._var_set_level, False, pyads.PLCTYPE_BOOL)
 
     def turn_on(self):
-        """Level-based on: no bOn pin is wired, so "on" is just a nonzero level."""
-        self.set_brightness(self._DEFAULT_ON_PERCENT)
-
-    def turn_off(self):
-        """Level-based off: level 0, same bSetLevel/nLevel pins as dimming."""
-        self.set_brightness(0)
+        """
+        Rising-edge "on" trigger — mirrors how the physical wall switch
+        (bSwitch) already drives this same FB input for channels 1-28.
+        No-op on 30/31 (motion-sensor-only, no bOn wiring exists for them).
+        """
+        if self._client.mock:
+            self._mock_on = True
+            return
+        if self.channel in self._MOTION_ONLY_CHANNELS:
+            return
+        self._client.write(self._var_on, True,  pyads.PLCTYPE_BOOL)
+        time.sleep(0.05)
+        self._client.write(self._var_on, False, pyads.PLCTYPE_BOOL)
 
     def read_actual_level(self) -> int:
         if self._client.mock:
@@ -171,14 +182,14 @@ class WallRelay:
     Read side: gvlDALI.bRelay{channel-1} — confirmed live on the real PLC
     (WallLight_POU.TcPOU writes it every scan from internal light state).
 
-    Write side: gvlController.bRelayCmd{channel-1} / bRelaySet{channel-1} —
-    deployed in the isolated gvlController.TcGVL + POU_Controller.TcPOU.
-    A rising edge on bRelaySetN sets gvlDALI_State.bLightStateN (the same
-    internal state WallLight_POU already mirrors into bRelayN every scan)
-    for channels 1/3/4 (relays 0/2/3) — same effect as a physical switch
-    press, doesn't touch WallLight_POU itself. Channel 2 / relay 1 (Guest
-    Bathroom) is handled specially in POU_Controller since its physical
-    output is driven by a motion sensor, not by the shared light state.
+    Write side: gvlDALI.bPyRelayCmd{channel-1} / bPyRelaySet{channel-1} —
+    NOT yet present on the real PLC. WallLight_POU currently drives the
+    light exclusively from the physical wall switch (bSwitchOn30-33) and
+    motion sensor (bSensor0-3); there is no command input it reads from
+    Python at all, so writes here will fail with "symbol not found" until
+    the corresponding TwinCAT ST addition (see docs/plc_proposals/) is
+    reviewed and deployed by someone with TwinCAT access. See
+    ADSClient/DeviceRegistry docstrings for the same caveat on DALI.
     """
 
     def __init__(self, channel: int, name: str, room: str, client):
@@ -193,9 +204,9 @@ class WallRelay:
     @property
     def _var_state(self)    -> str: return f'gvlDALI.bRelay{self.channel - 1}'
     @property
-    def _var_cmd(self)      -> str: return f'gvlController.bRelayCmd{self.channel - 1}'
+    def _var_cmd(self)      -> str: return f'gvlDALI.bPyRelayCmd{self.channel - 1}'
     @property
-    def _var_cmd_set(self)  -> str: return f'gvlController.bRelaySet{self.channel - 1}'
+    def _var_cmd_set(self)  -> str: return f'gvlDALI.bPyRelaySet{self.channel - 1}'
 
     # Public alias + decoder — see DaliChannel.batch_var.
     @property
@@ -207,6 +218,7 @@ class WallRelay:
         return bool(raw)
 
     def set_state(self, on: bool):
+        """Requires the pending TwinCAT bPyRelayCmd/bPyRelaySet addition — see class docstring."""
         if self._client.mock:
             self._mock_state = on
             return
