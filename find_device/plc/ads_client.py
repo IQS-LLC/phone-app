@@ -325,6 +325,23 @@ class ADSClient:
         """Signal the background reconnect thread to exit cleanly."""
         self._stop_reconnect.set()
 
+    # ADS error codes that mean "this specific symbol doesn't exist / doesn't
+    # match the currently-loaded PLC program" — a compile-time mismatch, not
+    # a connectivity problem. A device with no real hardware backing (e.g.
+    # curtains — see devices.py) hits this on every single poll forever;
+    # treating it as a dropped connection tore the whole ADS session down
+    # and rebuilt it every ~2s, continuously, which risked exactly the kind
+    # of route/session churn on the CX this project has been fighting.
+    _SYMBOL_ERROR_CODES = frozenset({
+        1808,  # ADSERR_DEVICE_SYMBOLNOTFOUND
+        1809,  # ADSERR_DEVICE_SYMBOLVERSIONINVALID (stale handle after a
+               # PLC rebuild/download changed the symbol table)
+    })
+
+    @classmethod
+    def _is_symbol_error(cls, exc: Exception) -> bool:
+        return isinstance(exc, pyads.ADSError) and getattr(exc, 'err_code', None) in cls._SYMBOL_ERROR_CODES
+
     def _mark_disconnected_and_reconnect(self, reason: str):
         """Mark connection as lost and trigger background reconnect."""
         with self._lock:
@@ -364,7 +381,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient: read '%s' failed: %s", var_name, err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
                 raise ConnectionError(err) from exc
 
     def write(self, var_name: str, value: Any, plctype: Any):
@@ -389,7 +407,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient: write '%s' failed: %s", var_name, err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
                 raise ConnectionError(err) from exc
 
     # =========================================================================
@@ -423,7 +442,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient.read_batch failed: %s", err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
                 return {}
 
     def write_batch(self, var_value_map: Dict[str, Any]):
@@ -450,7 +470,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient.write_batch failed: %s", err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
 
     # =========================================================================
     # Symbol handle cache
@@ -547,7 +568,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient.read_by_handle(%d) failed: %s", handle, err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
                 raise ConnectionError(err) from exc
 
     def write_by_handle(self, handle: int, value: Any, plctype: Any):
@@ -578,7 +600,8 @@ class ADSClient:
             except Exception as exc:
                 err = str(exc)
                 logger.error("ADSClient.write_by_handle(%d) failed: %s", handle, err)
-                self._mark_disconnected_and_reconnect(err)
+                if not self._is_symbol_error(exc):
+                    self._mark_disconnected_and_reconnect(err)
                 raise ConnectionError(err) from exc
 
     # =========================================================================
