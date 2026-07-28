@@ -1,24 +1,46 @@
-# Proposed TwinCAT change: app control of the 30 DALI dimmer channels
+# TwinCAT change: app control of the 30 DALI dimmer channels + 4 wall relays
 
-**Status: reverted. Do not redeploy this as-is.** This was built and
-downloaded to the real CX8190 once. Wiring `bOn` into the 28
-previously-unconnected switch-driven instances (see "What this adds" below)
-fought with the existing switch/motion-sensor logic once live — the FB
-apparently treats a connected `bOn` as a continuous command rather than an
-inert pin, so a permanently-FALSE array value suppressed normal switch
-behavior. Result: most switches stopped operating lights and sensor-driven
-lights stopped working, building-wide, until caught and fixed on-site.
+**Status: redesigned and re-deployed to source, not yet built/downloaded to
+the real CX8190.** The first attempt wired `bOn` into 28
+previously-unconnected switch-driven instances and that fought with the
+existing switch/motion-sensor logic once live — the FB apparently treats a
+connected `bOn` as a continuous command rather than an inert pin, so a
+permanently-FALSE array value suppressed normal switch behavior. Result:
+most switches stopped operating lights and sensor-driven lights stopped
+working, building-wide, until caught and fixed on-site. All four PLC
+source files touched by that attempt were fully reverted.
 
-All four PLC source files touched (`POU.TcPOU`, `gvlDALI.TcGVL`,
-`WallLight_POU.TcPOU`, `POU_GUEST_Bathroom.TcPOU`) have been reverted to
-their pre-change state. None of the `aPyDali*` variables described below
-currently exist on the real PLC — `find_device/plc/devices.py`'s
-`DaliChannel` class will hit `ADSError: symbol not found` for every
-read/write until this is redesigned. The `bSetLevel`/`nLevel`/`nLevel`
-retargeting portion of this proposal (non-`bOn` pins) was never
-independently confirmed safe on its own — treat the whole proposal as
-unverified, not just the `bOn` piece, until it can be re-applied and
-physically tested pin-by-pin rather than all 30 channels at once.
+**This redesign, isolated in two brand-new files:**
+- `GVLs/gvlController.TcGVL` — every variable the app reads/writes, in one
+  place, separate from `gvlDALI`/`gvlDALI_State`.
+- `POUs/POU_Controller.TcPOU` — the logic connecting those variables to the
+  real hardware. Called last from `MAIN` (after `POU_GUEST_Bathroom`).
+  Doesn't edit `WallLight_POU.TcPOU` or `POU_GUEST_Bathroom.TcPOU` at all.
+
+**The one deliberate change from the first attempt: `bOn` is not wired,
+anywhere, on any of the 30 instances.** On/off is expressed purely through
+level (0 = off, >0 = on) via the same `bSetLevel`/`nLevel` pins already
+used for dimming — the only pins retargeted are `bSetLevel`, `nLevel`, and
+`nActualLevel`. `bOn`/`bOff` are untouched on every instance, including
+30/31 where they're wired to a motion sensor, verified byte-identical
+against the pre-change file (same connection graph, same pin IDs).
+
+Wall relay control (Lights 1/3/4) goes through the same isolated POU,
+setting `gvlDALI_State.bLightStateN` on a rising edge — the same internal
+state `WallLight_POU` already mirrors into `bRelayN` every scan, so it
+behaves exactly like a physical switch press without editing that POU.
+Light 2 / Guest Bathroom (relay 1) is driven by a motion sensor via
+`POU_GUEST_Bathroom`, not by that shared state, so `POU_Controller` handles
+it with its own override-that-clears-on-sensor-transition logic instead,
+running after `POU_GUEST_Bathroom` so it has the final say each scan.
+
+**Still true, and worth being honest about:** the `bSetLevel`/`nLevel`
+retargeting itself was never independently physically verified in
+isolation — only the `bOn` wiring was conclusively identified as the cause
+of the outage. This redesign removes the one proven-dangerous piece, but
+"all 30 channels in one build/download" was a deliberate choice to move
+faster rather than pilot one channel first — physically test all of it
+(switches, motion sensors, and the new app controls) before trusting it.
 
 **Gotcha hit and fixed during the first deploy attempt (documented for next
 time):** `gvlDALI` is declared `{attribute 'qualified_only'}`, so every
@@ -100,13 +122,12 @@ good way to confirm the approach works before touching all 30 dimmers.
 
 ## Django-side status
 
-`DaliChannel` in `devices.py` was updated to target
-`aPyDaliLevel[N]`/`aPyDaliSetLevel[N]`/`aPyDaliOn[N]`/`aPyDaliActual[N]`
-while this proposal was briefly live, and has been left pointing at those
-names (documented in its docstring as currently non-functional) rather than
-reverted to the equally-nonexistent original names — either way nothing
-real backs these symbols right now. Once a redesigned, physically-verified
-wiring exists, repoint the same three `_var_*` properties again.
+`DaliChannel` and `WallRelay` in `devices.py` point at the new
+`gvlController.*` names described above. `DaliChannel.turn_on()`/
+`turn_off()` are now level-based (`set_brightness(100)`/`set_brightness(0)`)
+instead of writing a `bOn` pin, since none is wired. All of this will hit
+`ADSError: symbol not found` until the TwinCAT side is actually built and
+downloaded to the real CX8190.
 
 The 16 "Light 1-16" `ApartmentDevice` rows currently in the database are
 generic placeholder data (channel numbers 1-16, sequential) that don't
