@@ -232,6 +232,16 @@ TF6250 (port 502) that survives AMS route/Secure-ADS failures ADS doesn't.
 See `docs/plc_proposals/modbus_bridge.md` — requires TF6250 installed and
 licensed on the CX8190 first; nothing connects until that env var is set.
 
+**Outage heartbeat/alerting:** `find_device.tasks.check_plc_heartbeat` (Celery
+Beat, every minute) tracks every apartment's reachability (ADS or Modbus) via
+`PLCDevice.down_since`/`last_seen_at` and fires `send_notification` once on
+outage-start (>2 min down) and once on recovery — deliberately ignores
+`PLCDevice.is_active` (that flag only gates the background SSE poll, not
+whether an apartment gets outage-monitored). `PLC_OUTAGE_WEBHOOK_URL` (unset
+by default) posts the same alert to ntfy.sh/Slack/Discord for an actual phone
+notification today — `send_notification` itself only logs until FCM/APNs
+credentials are wired up.
+
 ---
 
 ## Role System

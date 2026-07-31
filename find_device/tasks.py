@@ -10,7 +10,9 @@ Queues:
 from __future__ import annotations
 
 import logging
+import os
 import time
+import urllib.request
 
 from celery import shared_task
 from django.utils import timezone
@@ -93,6 +95,112 @@ def poll_plc_state(self):
         logger.debug("poll_plc_state: polled %d apartment(s)", polled)
     except Exception as exc:
         logger.error("poll_plc_state: unexpected error — %s", exc)
+        raise self.retry(exc=exc)
+
+
+# ── PLC heartbeat / outage alerting ────────────────────────────────────────────
+
+# Every real outage traced this project has been physical (power/network),
+# not a protocol bug — this doesn't fix the CX going dark, it makes it
+# visible immediately instead of "found out by opening the app later".
+#
+# Don't alert on ordinary reconnect blips: ADSClient's own backoff loop
+# tops out at 60 s, so anything shorter than this is normal self-healing,
+# not an outage worth waking someone up for.
+_OUTAGE_ALERT_THRESHOLD_S = 120
+
+def _send_outage_webhook(message: str):
+    """
+    Optional zero-setup notification channel — e.g. ntfy.sh (POST to
+    https://ntfy.sh/<your-topic>, no account needed, free Android/iOS app)
+    or a Slack/Discord incoming webhook. Unset by default (no-op) until
+    PLC_OUTAGE_WEBHOOK_URL is configured; this exists alongside
+    send_notification (below) which is the in-app channel but currently
+    logs only — FCM/APNs isn't wired up yet.
+    """
+    url = os.getenv("PLC_OUTAGE_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=message.encode("utf-8"), method="POST",
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as exc:
+        logger.warning("check_plc_heartbeat: webhook delivery failed: %s", exc)
+
+
+@shared_task(name="find_device.tasks.check_plc_heartbeat", bind=True, max_retries=2)
+def check_plc_heartbeat(self):
+    """
+    Track every apartment's PLC reachability (ADS or, if enabled, Modbus)
+    and alert exactly once on outage-start and once on recovery.
+
+    Deliberately does NOT filter on PLCDevice.is_active — that flag only
+    gates the background SSE convenience poll (poll_plc_state above), it
+    doesn't mean "don't bother checking this one's actually reachable".
+    Apartment 16's PLCDevice currently has is_active=False, which would
+    silently make this a no-op for the one real apartment if it used the
+    same filter poll_plc_state does.
+
+    down_since lives on PLCDevice (not an in-memory dict) so a Celery
+    worker restart mid-outage doesn't lose track of it or re-fire the
+    outage-start alert on the next tick. Runs every minute via Celery Beat.
+    """
+    try:
+        from .models import Apartment, PLCDevice
+        from .plc.registry import DeviceRegistry
+
+        now = timezone.now()
+        apartments = (
+            Apartment.objects
+            .filter(plc_device__isnull=False)
+            .select_related("plc_device")
+        )
+
+        for apt in apartments:
+            device: PLCDevice = apt.plc_device
+            try:
+                registry = DeviceRegistry.for_apartment(apt.pk)
+                up = registry.connected or registry.modbus_connected
+            except Exception as exc:
+                logger.warning("check_plc_heartbeat: apartment %d check failed — %s", apt.pk, exc)
+                continue
+
+            if up:
+                if device.down_since is not None:
+                    outage_s = (now - device.down_since).total_seconds()
+                    device.down_since = None
+                    device.last_seen_at = now
+                    device.save(update_fields=["down_since", "last_seen_at"])
+                    if outage_s >= _OUTAGE_ALERT_THRESHOLD_S:
+                        msg = f"{apt.name}: PLC back online after {int(outage_s // 60)}m{int(outage_s % 60)}s"
+                        logger.warning("check_plc_heartbeat: %s", msg)
+                        send_notification.delay(apt.pk, "PLC reconnected", msg, priority="normal")
+                        _send_outage_webhook(msg)
+                else:
+                    device.last_seen_at = now
+                    device.save(update_fields=["last_seen_at"])
+                continue
+
+            # Unreachable this tick.
+            if device.down_since is None:
+                device.down_since = now
+                device.save(update_fields=["down_since"])
+                continue
+
+            outage_s = (now - device.down_since).total_seconds()
+            # Fire exactly once, the first tick after crossing the
+            # threshold — not again on every subsequent minute of the
+            # same ongoing outage.
+            if _OUTAGE_ALERT_THRESHOLD_S <= outage_s < _OUTAGE_ALERT_THRESHOLD_S + 60:
+                msg = f"{apt.name}: PLC unreachable for over {_OUTAGE_ALERT_THRESHOLD_S // 60} minute(s)"
+                logger.error("check_plc_heartbeat: %s", msg)
+                send_notification.delay(apt.pk, "PLC offline", msg, priority="high")
+                _send_outage_webhook(msg)
+    except Exception as exc:
+        logger.error("check_plc_heartbeat: unexpected error — %s", exc)
         raise self.retry(exc=exc)
 
 

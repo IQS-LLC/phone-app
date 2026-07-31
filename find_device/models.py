@@ -175,6 +175,14 @@ class PLCDevice(models.Model):
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+    down_since   = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Set when check_plc_heartbeat first observes this device "
+                   "unreachable (ADS and Modbus both down); cleared on "
+                   "recovery. Persisted (not in-memory) so a Celery worker "
+                   "restart mid-outage doesn't lose track of it or re-fire "
+                   "the outage-start alert.",
+    )
 
     class Meta:
         ordering        = ["-updated_at"]

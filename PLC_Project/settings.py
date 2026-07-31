@@ -327,6 +327,12 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(minute="*"),
         "options":  {"queue": "housekeeping"},
     },
+    # PLC reachability heartbeat — alert on real outages/recoveries, every minute
+    "check-plc-heartbeat": {
+        "task":     "find_device.tasks.check_plc_heartbeat",
+        "schedule": crontab(minute="*"),
+        "options":  {"queue": "housekeeping"},
+    },
     # Archive audit log entries older than 90 days at 02:00 UTC daily
     "archive-audit-log": {
         "task":     "find_device.tasks.archive_audit_log",
