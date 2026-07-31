@@ -165,6 +165,11 @@ if not DEBUG and os.getenv("HTTPS_ENABLED", "False").lower() == "true":
     SESSION_COOKIE_SECURE             = True
     CSRF_COOKIE_SECURE                = True
     SECURE_SSL_REDIRECT               = True
+    # Without this, Django has no way to know nginx (or Cloudflare in front
+    # of it) already terminated TLS — every request arrives at gunicorn as
+    # plain HTTP, so SECURE_SSL_REDIRECT sees "not HTTPS" and redirects,
+    # forever. nginx.conf must set X-Forwarded-Proto for this to be correct.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ── Structured logging ────────────────────────────────────────────────────────
 

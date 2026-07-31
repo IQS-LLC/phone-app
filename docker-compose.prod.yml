@@ -8,6 +8,13 @@
 #   DOCKERHUB_USERNAME=<your docker hub handle>
 #   SECRET_KEY=<django secret key>
 #   POSTGRES_PASSWORD=<db password>
+#   PLC_ROUTE_USERNAME=<TwinCAT/CX embedded OS username, e.g. Administrator>
+#   PLC_ROUTE_PASSWORD=<TwinCAT/CX embedded OS password>
+#
+# Optional env vars:
+#   PLC_MODBUS_ENABLED=true       — TF6250 fallback, see modbus_bridge.md
+#   PLC_OUTAGE_WEBHOOK_URL=<url>  — ntfy.sh/Slack/Discord outage alerts
+#   HTTPS_ENABLED=true            — only once TLS actually terminates in front
 #
 # NAS first-time setup:
 #   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
@@ -16,6 +23,8 @@
 #   DOCKERHUB_USERNAME=yourhandle
 #   SECRET_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(50))">
 #   POSTGRES_PASSWORD=<strong-password>
+#   PLC_ROUTE_USERNAME=Administrator
+#   PLC_ROUTE_PASSWORD=<CX embedded OS password>
 #   EOF
 #   chmod 600 /volume1/docker/lugh/.env
 #   docker compose -f /volume1/docker/lugh/docker-compose.prod.yml up -d
@@ -42,10 +51,31 @@ x-django-env: &django-env
     # (TwinCAT System Manager Routes tab). Without it pyads defaults to an
     # unroutable local identity and real ADS connections fail on the target.
     LOCAL_AMS_NET_ID: "192.168.0.158.1.1"
+    LOCAL_AMS_HOST:   "192.168.0.158"
+    # Same credentials used to log into TwinCAT/the CX's embedded OS — lets
+    # ADSClient auto-repair its AMS route on the target when TwinCAT resets
+    # it (rebuild/reactivate/redownload clears dynamic routes). Without
+    # both LOCAL_AMS_HOST above and these two, auto route-repair silently
+    # no-ops — the single most common recurring failure mode this project
+    # has hit, so don't deploy without setting PLC_ROUTE_USERNAME/PASSWORD
+    # in .env.
+    PLC_ROUTE_USERNAME: ${PLC_ROUTE_USERNAME}
+    PLC_ROUTE_PASSWORD: ${PLC_ROUTE_PASSWORD}
     # Subnets to scan when the installer uses the Commissioning Wizard's
     # "Discover PLCs" step. Comma-separated CIDR notation.
     PLC_DISCOVERY_SUBNETS: "192.168.0.0/24"
     WEB_CONCURRENCY: "1"
+    # Modbus TCP fallback (TF6250) — see docs/plc_proposals/modbus_bridge.md.
+    # Leave false until TF6250 is installed/licensed on the CX; defaults
+    # off so this var is optional in .env.
+    PLC_MODBUS_ENABLED: ${PLC_MODBUS_ENABLED:-false}
+    # Optional: ntfy.sh/Slack/Discord webhook for outage alerts (see
+    # check_plc_heartbeat in tasks.py). Empty = no-op.
+    PLC_OUTAGE_WEBHOOK_URL: ${PLC_OUTAGE_WEBHOOK_URL:-}
+    # Set true only once HTTPS actually terminates in front of this stack
+    # (see settings.py's SECURE_PROXY_SSL_HEADER comment) — flips on HSTS/
+    # secure-cookie/SSL-redirect. Leave false if serving plain HTTP.
+    HTTPS_ENABLED: ${HTTPS_ENABLED:-false}
 
 services:
 

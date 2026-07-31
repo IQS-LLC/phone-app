@@ -7,6 +7,7 @@ Covers the two properties that must never regress:
      never another apartment's, regardless of what they ask for.
 """
 from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -16,7 +17,9 @@ from find_device.models import (
     Apartment, ApartmentDevice, ApartmentMembership, PLCDevice, Role, Room,
     TemporaryAccess,
 )
+from find_device.plc.devices import CurtainMotor
 from find_device.plc.registry import DeviceRegistry
+from find_device.tasks import check_plc_heartbeat
 
 
 class AuthGateTests(TestCase):
@@ -1288,3 +1291,200 @@ class MapApiTests(TestCase):
     def test_resident_cannot_access_device_picker(self):
         resp = self.client.get(f"/map/{self.apt16.pk}/devices/", **self._auth("mapresident"))
         self.assertEqual(resp.status_code, 403)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Curtain command translation (added alongside the gvlCurtain PLC bridge)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FakeAdsClient:
+    """Records writes and serves canned reads — not an ADSClient, just
+    enough surface (mock/read/write) for a single device class under test."""
+
+    def __init__(self):
+        self.mock = False
+        self.writes = {}
+        self.reads  = {}
+
+    def write(self, var, value, plctype):
+        self.writes[var] = value
+
+    def read(self, var, plctype):
+        return self.reads.get(var, False)
+
+
+class CurtainMotorTranslationTests(TestCase):
+    """
+    CurtainMotor previously targeted gvlIO.aPyCurtainCmd/State, which never
+    existed on the real PLC — every call failed with ADSError: symbol not
+    found. These pin the fix: the app-facing stop/up/down (0/1/2) contract
+    must translate correctly onto gvlCurtain's OpenBtn/CloseBtn/Open/Close.
+    """
+
+    def setUp(self):
+        self.client_stub = _FakeAdsClient()
+        self.curtain = CurtainMotor(1, "Living Room Curtain", "Living Room", self.client_stub)
+
+    def test_max_index_is_2_not_16(self):
+        # Only 2 physical curtains exist (gvlCurtain wires Curtain 1/2 only).
+        with self.assertRaises(ValueError):
+            CurtainMotor(3, "Nonexistent", "Nowhere", self.client_stub)
+
+    def test_up_command_opens_and_clears_close(self):
+        self.curtain.set_command(CurtainMotor.UP)
+        self.assertTrue(self.client_stub.writes["gvlCurtain.bCurtain1OpenBtn"])
+        self.assertFalse(self.client_stub.writes["gvlCurtain.bCurtain1CloseBtn"])
+
+    def test_down_command_closes_and_clears_open(self):
+        self.curtain.set_command(CurtainMotor.DOWN)
+        self.assertFalse(self.client_stub.writes["gvlCurtain.bCurtain1OpenBtn"])
+        self.assertTrue(self.client_stub.writes["gvlCurtain.bCurtain1CloseBtn"])
+
+    def test_stop_command_clears_both(self):
+        self.curtain.set_command(CurtainMotor.STOP)
+        self.assertFalse(self.client_stub.writes["gvlCurtain.bCurtain1OpenBtn"])
+        self.assertFalse(self.client_stub.writes["gvlCurtain.bCurtain1CloseBtn"])
+
+    def test_read_state_reflects_open_output(self):
+        self.client_stub.reads["gvlCurtain.bCurtain1Open"] = True
+        self.assertEqual(self.curtain.read_state(), CurtainMotor.UP)
+
+    def test_read_state_reflects_close_output(self):
+        self.client_stub.reads["gvlCurtain.bCurtain1Close"] = True
+        self.assertEqual(self.curtain.read_state(), CurtainMotor.DOWN)
+
+    def test_read_state_stopped_when_neither_output_set(self):
+        self.assertEqual(self.curtain.read_state(), CurtainMotor.STOP)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADS/Modbus fallback (registry.py) — only DALI 1-16 / relay 1-4 are bridged
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RegistryModbusFallbackTests(TestCase):
+    """
+    Modbus exists specifically to survive the class of ADS failure this
+    project keeps hitting (route resets, Secure ADS). These pin that the
+    fallback actually engages on an ADS failure, stays out of the way when
+    ADS is healthy, and never silently swallows a failure when Modbus
+    isn't available either.
+    """
+
+    def setUp(self):
+        apt = Apartment.objects.get(name="Apartment 16")
+        self.registry = DeviceRegistry.for_apartment(apt.pk)
+
+    def test_no_fallback_when_ads_succeeds(self):
+        dali = self.registry.dali(1)
+        with patch.object(dali, "read_actual_level", return_value=42) as ads_read:
+            result = self.registry.read_dali_actual_pct(1)
+        self.assertEqual(result, 42)
+        ads_read.assert_called_once()
+
+    def test_dali_read_falls_back_to_modbus_when_ads_fails(self):
+        dali = self.registry.dali(1)
+        fake_modbus = MagicMock()
+        fake_modbus.is_connected = True
+        fake_modbus.read_dali_level.return_value = 127  # raw byte, ~50%
+        self.registry._modbus = fake_modbus
+        with patch.object(dali, "read_actual_level", side_effect=ConnectionError("ADS down")):
+            result = self.registry.read_dali_actual_pct(1)
+        fake_modbus.read_dali_level.assert_called_once_with(1)
+        self.assertIsNotNone(result)
+
+    def test_dali_read_reraises_when_modbus_also_unavailable(self):
+        dali = self.registry.dali(1)
+        self.registry._modbus = None  # PLC_MODBUS_ENABLED=false — the default
+        with patch.object(dali, "read_actual_level", side_effect=ConnectionError("ADS down")):
+            with self.assertRaises(ConnectionError):
+                self.registry.read_dali_actual_pct(1)
+
+    def test_relay_write_falls_back_to_modbus_when_ads_fails(self):
+        relay = self.registry.relay(1)
+        fake_modbus = MagicMock()
+        fake_modbus.is_connected = True
+        fake_modbus.write_relay.return_value = True
+        self.registry._modbus = fake_modbus
+        with patch.object(relay, "set_state", side_effect=ConnectionError("ADS down")):
+            self.registry.write_relay_state(1, True)  # must not raise
+        fake_modbus.write_relay.assert_called_once_with(0, True)  # channel 1 -> relay index 0
+
+    def test_fallback_never_attempted_for_unconfigured_channel(self):
+        # No relay 5 exists on this registry (only 4 physical relays are
+        # seeded) — read_relay_actual must return None via the normal
+        # "device not configured" path without ever touching Modbus, even
+        # though Modbus itself is reachable here.
+        fake_modbus = MagicMock()
+        fake_modbus.is_connected = True
+        self.registry._modbus = fake_modbus
+        self.assertIsNone(self.registry.read_relay_actual(5))
+        fake_modbus.read_relay.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PLC outage heartbeat (tasks.check_plc_heartbeat)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PlcHeartbeatTests(TestCase):
+    """
+    check_plc_heartbeat must persist outage state on PLCDevice (survives a
+    worker restart) and alert exactly once per transition — not on every
+    tick of an ongoing outage, and not for blips shorter than the
+    reconnect loop's own backoff ceiling.
+    """
+
+    def setUp(self):
+        self.apt = Apartment.objects.get(name="Apartment 16")
+        owner = User.objects.create_user(username="heartbeat_owner", password="pw12345")
+        self.device = PLCDevice.objects.create(
+            apartment=self.apt, owner=owner, name="Heartbeat Test PLC",
+            ip_address="192.168.0.161", ams_net_id="192.168.0.161.1.1",
+        )
+
+    def _run_with_status(self, up: bool):
+        fake_registry = MagicMock()
+        fake_registry.connected = up
+        fake_registry.modbus_connected = False
+        with patch(
+            "find_device.plc.registry.DeviceRegistry.for_apartment",
+            return_value=fake_registry,
+        ), patch("find_device.tasks.send_notification") as notify:
+            check_plc_heartbeat()
+        return notify
+
+    def test_first_down_tick_records_down_since_without_alerting(self):
+        notify = self._run_with_status(up=False)
+        self.device.refresh_from_db()
+        self.assertIsNotNone(self.device.down_since)
+        notify.delay.assert_not_called()
+
+    def test_short_blip_does_not_alert_on_recovery(self):
+        self.device.down_since = timezone.now() - timedelta(seconds=10)
+        self.device.save(update_fields=["down_since"])
+        notify = self._run_with_status(up=True)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.down_since)
+        notify.delay.assert_not_called()
+
+    def test_outage_past_threshold_alerts_exactly_once(self):
+        self.device.down_since = timezone.now() - timedelta(seconds=125)
+        self.device.save(update_fields=["down_since"])
+        notify = self._run_with_status(up=False)
+        notify.delay.assert_called_once()
+        _, kwargs = notify.delay.call_args
+        self.assertEqual(kwargs["priority"], "high")
+
+    def test_recovery_after_real_outage_alerts_once_with_duration(self):
+        self.device.down_since = timezone.now() - timedelta(minutes=5)
+        self.device.save(update_fields=["down_since"])
+        notify = self._run_with_status(up=True)
+        self.device.refresh_from_db()
+        self.assertIsNone(self.device.down_since)
+        notify.delay.assert_called_once()
+
+    def test_ongoing_outage_does_not_re_alert_every_tick(self):
+        # Already well past the threshold on a previous tick.
+        self.device.down_since = timezone.now() - timedelta(seconds=300)
+        self.device.save(update_fields=["down_since"])
+        notify = self._run_with_status(up=False)
+        notify.delay.assert_not_called()
