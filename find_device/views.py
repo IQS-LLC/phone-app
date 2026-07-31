@@ -228,8 +228,15 @@ def get_diagnostics(request):
     try:
         state = r.read_full_state()
 
+        from django.apps import apps
+        PLCDevice = apps.get_model('find_device', 'PLCDevice')
+        plc_device = PLCDevice.objects.filter(apartment_id=r.apartment_id).first()
+
         return _ok({
-            "plc_connected":   r.connected,
+            "plc_connected":     r.connected,
+            "modbus_connected":  r.modbus_connected,
+            "down_since":        plc_device.down_since.isoformat() if plc_device and plc_device.down_since else None,
+            "last_seen_at":      plc_device.last_seen_at.isoformat() if plc_device and plc_device.last_seen_at else None,
             "mock":            r.mock,
             "apartment_id":    r.apartment_id,
             "dali_channels":   len(r.all_dali()),
@@ -430,8 +437,8 @@ _CURTAIN_CMD_MAP = {
 @csrf_exempt
 @require_POST
 def set_curtain(request, index: int):
-    if not 1 <= index <= 16:
-        return _err(f"Curtain index must be 1-16, got {index}", "INVALID_PARAM", 400)
+    if not 1 <= index <= CurtainMotor.MAX_INDEX:
+        return _err(f"Curtain index must be 1-{CurtainMotor.MAX_INDEX}, got {index}", "INVALID_PARAM", 400)
 
     raw = request.POST.get("cmd", "").lower().strip()
     if raw not in _CURTAIN_CMD_MAP:

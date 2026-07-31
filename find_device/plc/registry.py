@@ -442,6 +442,8 @@ class DeviceRegistry:
         return {
             'mock':        self._client.mock,
             'apartment_id': self.apartment_id,
+            'plc_connected':    self._client.is_connected,
+            'modbus_connected': self.modbus_connected,
             'dali':        dali_levels,
             'relays':      relay_states,
             'curtains':    curtain_states,

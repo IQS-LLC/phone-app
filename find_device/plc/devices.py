@@ -262,19 +262,36 @@ class SwitchInput:
 
 class CurtainMotor:
     """
-    Curtain/blind motor (index 1-16).
+    Curtain motor (index 1-2 — only 2 physical curtains exist: Curtain 1/2,
+    driven by KL2809 relay outputs via gvlCurtain/POU_Curtain in the
+    Apartmant16 TwinCAT project). Momentary/held-while-true on the PLC
+    side (POU_Curtain: output stays on only while the button input is
+    true, off as soon as it's released) — this class's stop/up/down
+    command API is translated into that button-press model so the
+    existing app/API contract (0=stop, 1=up, 2=down) doesn't change.
 
-    Commands : 0 = stop,  1 = up (raise),  2 = down (lower)
-    State     : mirrors command after PLC safety interlock resolves it.
+    Earlier revision of this class targeted gvlIO.aPyCurtainCmd/State,
+    which was never implemented on the real PLC (confirmed: no gvlIO GVL
+    exists in this project) — every read/write against it failed with
+    ADSError: symbol not found. This retargets it at the GVL that
+    actually exists.
+
+    Commands : 0 = stop,  1 = up (open),  2 = down (close)
+    State    : reflects the PLC's momentary Open/Close output, not a
+    persisted position — this mirrors a held button, not a motor that
+    runs to an end-stop on its own. Releasing (stop) reads back as 0 as
+    soon as the PLC clears both outputs next scan.
     """
 
     STOP = 0
     UP   = 1
     DOWN = 2
 
+    MAX_INDEX = 2  # gvlCurtain only wires Curtain 1 and Curtain 2
+
     def __init__(self, index: int, name: str, room: str, client):
-        if not 1 <= index <= 16:
-            raise ValueError(f"CurtainMotor index must be 1-16, got {index}")
+        if not 1 <= index <= self.MAX_INDEX:
+            raise ValueError(f"CurtainMotor index must be 1-{self.MAX_INDEX}, got {index}")
         self.index   = index
         self.name    = name
         self.room    = room
@@ -282,23 +299,32 @@ class CurtainMotor:
         self._mock_state = 0   # 0/1/2
 
     @property
-    def _var_cmd(self)   -> str: return f'gvlIO.aPyCurtainCmd[{self.index}]'
+    def _var_open_btn(self)  -> str: return f'gvlCurtain.bCurtain{self.index}OpenBtn'
     @property
-    def _var_state(self) -> str: return f'gvlIO.aPyCurtainState[{self.index}]'
+    def _var_close_btn(self) -> str: return f'gvlCurtain.bCurtain{self.index}CloseBtn'
+    @property
+    def _var_open(self)      -> str: return f'gvlCurtain.bCurtain{self.index}Open'
+    @property
+    def _var_close(self)     -> str: return f'gvlCurtain.bCurtain{self.index}Close'
 
     def set_command(self, cmd: int):
-        """Send stop (0), up (1), or down (2)."""
+        """Send stop (0), up/open (1), or down/close (2)."""
         if cmd not in (self.STOP, self.UP, self.DOWN):
             raise ValueError(f"Curtain cmd must be 0/1/2, got {cmd}")
         if self._client.mock:
             self._mock_state = cmd
             return
-        self._client.write(self._var_cmd, cmd, pyads.PLCTYPE_BYTE)
+        self._client.write(self._var_open_btn,  cmd == self.UP,   pyads.PLCTYPE_BOOL)
+        self._client.write(self._var_close_btn, cmd == self.DOWN, pyads.PLCTYPE_BOOL)
 
     def read_state(self) -> int:
         if self._client.mock:
             return self._mock_state
-        return int(self._client.read(self._var_state, pyads.PLCTYPE_BYTE))
+        if bool(self._client.read(self._var_open, pyads.PLCTYPE_BOOL)):
+            return self.UP
+        if bool(self._client.read(self._var_close, pyads.PLCTYPE_BOOL)):
+            return self.DOWN
+        return self.STOP
 
     def to_dict(self) -> Dict[str, Any]:
         return {'index': self.index, 'name': self.name, 'room': self.room,

@@ -126,6 +126,8 @@ class SecurityState {
 class SystemState {
   final bool                mock;
   final int                 apartmentId;
+  final bool                plcConnected;     // real ADS status, not just "did the HTTP call succeed"
+  final bool                modbusConnected;  // TF6250 fallback (see PLC_MODBUS_ENABLED) — usually false until enabled
 
   // Keyed by channel/index (int) or gvl_name (String)
   final Map<int, int?>      dali;           // channel → brightness %
@@ -141,6 +143,8 @@ class SystemState {
   const SystemState({
     required this.mock,
     required this.apartmentId,
+    required this.plcConnected,
+    required this.modbusConnected,
     required this.dali,
     required this.relays,
     required this.curtains,
@@ -190,8 +194,10 @@ class SystemState {
     final sec = j['security'] as Map<String, dynamic>?;
 
     return SystemState(
-      mock:          j['mock']         as bool? ?? true,
-      apartmentId:   j['apartment_id'] as int?  ?? 16,
+      mock:            j['mock']            as bool? ?? true,
+      apartmentId:     j['apartment_id']    as int?  ?? 16,
+      plcConnected:    j['plc_connected']    as bool? ?? false,
+      modbusConnected: j['modbus_connected'] as bool? ?? false,
       dali:          dali,
       relays:        relays,
       curtains:      curtains,
@@ -206,6 +212,7 @@ class SystemState {
 
   static const empty = SystemState(
     mock: true, apartmentId: 16,
+    plcConnected: false, modbusConnected: false,
     dali: {}, relays: {}, curtains: {}, switches: {},
     doorSensors: {}, windowSensors: {}, motionSensors: {},
     appliances: {}, security: SecurityState.empty,

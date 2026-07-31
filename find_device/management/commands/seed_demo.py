@@ -122,12 +122,15 @@ class Command(BaseCommand):
             ),
         )
 
-        # Curtain motors for Apartment 16 (channels 1–3)
+        # Curtain motors for Apartment 16 — only 2 physical curtains exist
+        # (Curtain 1/2, gvlCurtain/POU_Curtain in the TwinCAT project;
+        # CurtainMotor.MAX_INDEX enforces this). A stale 3rd row from
+        # before that was confirmed is removed below so existing installs
+        # converge on the same 2, not just fresh ones.
         apt16 = apartments["Apartment 16"]
         curtain_layout = [
             (1, "Living Room Curtain",  "Living Room"),
             (2, "Bedroom 1 Curtain",    "Bedroom 1"),
-            (3, "Bedroom 2 Curtain",    "Bedroom 2"),
         ]
         for idx, dev_name, room_name in curtain_layout:
             room = Room.objects.filter(apartment=apt16, name=room_name).first()
@@ -139,7 +142,15 @@ class Command(BaseCommand):
                     room=room, name=dev_name, sort_order=idx,
                 ),
             )
-        self.stdout.write(self.style.SUCCESS("Seeded 3 curtain devices for Apartment 16"))
+        stale = ApartmentDevice.objects.filter(
+            apartment=apt16, device_type=ApartmentDevice.TYPE_CURTAIN,
+        ).exclude(channel_or_index__in=[idx for idx, _, _ in curtain_layout])
+        removed = stale.count()
+        stale.delete()
+        self.stdout.write(self.style.SUCCESS(
+            f"Seeded {len(curtain_layout)} curtain devices for Apartment 16"
+            + (f" (removed {removed} stale row(s))" if removed else "")
+        ))
 
         # A scheduled, time-windowed example: cleaner with a 4-hour window
         # today, scoped to the Guest role's permission set.

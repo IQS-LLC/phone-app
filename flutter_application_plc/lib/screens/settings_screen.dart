@@ -562,6 +562,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               valueColor: s.state.mock ? C.orange : C.green, badge: true,
             ),
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
+            _InfoRow(
+              icon: Icons.swap_horiz_rounded, label: 'Modbus fallback',
+              value: s.state.modbusConnected ? 'Active' : 'Standby',
+              valueColor: s.state.modbusConnected ? C.green : C.textTri, badge: true,
+            ),
+            const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(icon: Icons.lightbulb_outline_rounded, label: 'DALI channels', value: '${s.daliDevices.length}'),
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(icon: Icons.toggle_on_outlined, label: 'Wall relays', value: '${s.relayDevices.length}'),
