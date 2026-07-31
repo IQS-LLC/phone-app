@@ -69,6 +69,7 @@ services:
     volumes:
       - static_vol:/app/static
       - media_vol:/app/media
+      - backup_vol:/app/backups
     depends_on:
       db:
         condition: service_healthy
@@ -96,6 +97,8 @@ services:
     env_file: .env
     environment:
       DJANGO_SETTINGS_MODULE: PLC_Project.settings
+    volumes:
+      - backup_vol:/app/backups
     command: >
       celery -A PLC_Project worker
         --loglevel=info
@@ -172,6 +175,7 @@ volumes:
   redis_data:
   static_vol:
   media_vol:
+  backup_vol:
 
 networks:
   lugh_net:

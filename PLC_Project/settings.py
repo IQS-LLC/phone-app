@@ -344,4 +344,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(hour=2, minute=0),
         "options":  {"queue": "housekeeping"},
     },
+    # pg_dump the database + prune old backups at 03:00 UTC daily — after
+    # archive-audit-log so they don't compete for the same table locks
+    "backup-database": {
+        "task":     "find_device.tasks.backup_database",
+        "schedule": crontab(hour=3, minute=0),
+        "options":  {"queue": "housekeeping"},
+    },
 }

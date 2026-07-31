@@ -20,9 +20,12 @@ FROM python:3.11-slim AS production
 
 WORKDIR /app
 
-# Runtime dependencies only
+# Runtime dependencies only. postgresql-client provides pg_dump/pg_restore
+# for backup_db (find_device/management/commands/backup_db.py) — libpq5
+# alone (just the client library) doesn't include those CLI tools.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
+    postgresql-client \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 

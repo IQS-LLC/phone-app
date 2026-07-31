@@ -17,7 +17,7 @@
 #   HTTPS_ENABLED=true            — only once TLS actually terminates in front
 #
 # NAS first-time setup:
-#   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media}
+#   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media,backups}
 #   cp docker-compose.prod.yml /volume1/docker/lugh/
 #   cat > /volume1/docker/lugh/.env <<'EOF'
 #   DOCKERHUB_USERNAME=yourhandle
@@ -126,6 +126,7 @@ services:
     volumes:
       - /volume1/docker/lugh/static:/app/staticfiles
       - /volume1/docker/lugh/media:/app/media
+      - /volume1/docker/lugh/backups:/app/backups
     depends_on:
       db:
         condition: service_healthy
@@ -150,6 +151,8 @@ services:
         --loglevel=info
         -Q plc,alarms,notifications,housekeeping
         --concurrency=4
+    volumes:
+      - /volume1/docker/lugh/backups:/app/backups
     depends_on:
       db:
         condition: service_healthy

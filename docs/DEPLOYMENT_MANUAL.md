@@ -250,6 +250,16 @@ Before touching the server, confirm and write into the table at the top of this 
 
 ## 3. Phase 1 — Synology NAS First-Time Setup
 
+> **Running inside a VM instead of directly on DSM?** Everything in this
+> section (Container Manager, the docker-socket permission fix, DSM Task
+> Scheduler) is DSM-specific and doesn't apply — a VM (e.g. Ubuntu Server,
+> via Synology Virtual Machine Manager) just needs Docker + Docker Compose
+> installed normally, no socket-permission quirk, and a systemd service
+> instead of DSM's Task Scheduler for boot-time startup. See
+> `scripts/vm-bootstrap.sh` for a one-shot script covering that path, then
+> skip straight to Section 4 (everything from there — tunnel, compose
+> stack, CI/CD — is identical either way).
+
 ### 3.1 Enable SSH
 
 1. Log into DSM at `http://<NAS_IP>:5000`
@@ -518,6 +528,18 @@ PLC_IP=<PLC_IP>
 PLC_NETID=<PLC_AMS_NET_ID>
 PLC_PORT=851
 PLC_DISCOVERY_SUBNETS=<LAN_SUBNET>
+# TwinCAT/CX embedded OS credentials — required for auto route-repair
+# (ads_client.py re-registers this host's AMS route on the CX whenever
+# TwinCAT resets it). Without both of these AND LOCAL_AMS_HOST above,
+# route-repair silently no-ops — this has been the single most common
+# recurring PLC connectivity failure in this project.
+PLC_ROUTE_USERNAME=<CX_OS_USERNAME>
+PLC_ROUTE_PASSWORD=<CX_OS_PASSWORD>
+# Optional — leave false/unset unless you know you need them:
+PLC_MODBUS_ENABLED=false
+PLC_OUTAGE_WEBHOOK_URL=
+HTTPS_ENABLED=false
+BACKUP_RETENTION_DAYS=14
 EOF
 
 chmod 600 /volume1/docker/lugh/.env
@@ -536,6 +558,11 @@ chmod 600 /volume1/docker/lugh/.env
 | `PLC_NETID` | ADS handshake fails (wrong routing) | Must be `<PLC_IP>.1.1`; update and restart |
 | `PLC_DISCOVERY_SUBNETS` | Commissioning wizard finds no PLCs on scan | Set to the correct LAN CIDR; restart `django` |
 | `DOCKERHUB_USERNAME` | Stack fails to pull image | Must match the Docker Hub account that owns `lugh-django` |
+| `PLC_ROUTE_USERNAME` / `PLC_ROUTE_PASSWORD` | Auto route-repair silently disabled — a route reset on the CX (rebuild/reactivate/redownload) then requires manually re-adding the route yourself instead of it self-healing | Set both, plus `LOCAL_AMS_HOST` (already baked into `docker-compose.prod.yml`); restart `django` + `celery-worker` |
+| `PLC_MODBUS_ENABLED` | Left `false`: no effect (Modbus fallback simply doesn't run). Set `true` before TF6250 is installed/licensed on the CX: logs a connection-failed warning every apartment start, harmless but noisy | See `docs/plc_proposals/modbus_bridge.md` before enabling |
+| `PLC_OUTAGE_WEBHOOK_URL` | Left unset: no effect (outage alerts only appear in logs) | Set to an ntfy.sh/Slack/Discord webhook URL for a real phone notification on outage/recovery |
+| `HTTPS_ENABLED` | Set `true` without a real TLS-terminating proxy in front: browser/app requests loop or get rejected (`SECURE_SSL_REDIRECT`) | Only set `true` once HTTPS genuinely terminates before nginx (see Section 4) |
+| `BACKUP_RETENTION_DAYS` | Left unset: defaults to 14 | Adjust to your desired retention window; see Section 5.5 |
 
 **How to change any .env value after deployment:**
 
@@ -672,6 +699,42 @@ Expected response:
 ```json
 {"status": "ok", "database": "ok", "redis": "ok", "plc_mode": "live"}
 ```
+
+### 5.8 Database Backups & Restore
+
+`check_plc_heartbeat`'s sibling housekeeping task, `backup_database`, runs
+`pg_dump` nightly at 03:00 UTC (after the 02:00 audit-log archival, so they
+don't compete for table locks) and prunes backups older than
+`BACKUP_RETENTION_DAYS` (default 14). Files land in
+`/volume1/docker/lugh/backups/` as `lugh_db_<UTC timestamp>.dump` —
+`pg_dump`'s custom format (`-Fc`): compressed, and restorable selectively
+with `pg_restore`, not just all-or-nothing like a plain `.sql` file.
+
+**Run a backup manually (e.g. right before a risky change):**
+```bash
+docker exec lugh_django python manage.py backup_db
+```
+
+**List what's in a backup without restoring anything:**
+```bash
+docker exec lugh_django pg_restore --list /app/backups/lugh_db_<timestamp>.dump
+```
+
+**Restore (⚠️ destructive — this overwrites the live database):**
+```bash
+# Stop everything that touches the DB first
+docker compose -f /volume1/docker/lugh/docker-compose.prod.yml stop django celery-worker celery-beat
+
+docker exec -i lugh_db pg_restore -U lugh_user -d lugh_db --clean --if-exists \
+  < /volume1/docker/lugh/backups/lugh_db_<timestamp>.dump
+
+docker compose -f /volume1/docker/lugh/docker-compose.prod.yml start django celery-worker celery-beat
+```
+
+**Copy backups off the NAS** (a backup that only lives on the same disk as
+the database it protects doesn't protect against disk failure) — e.g. via
+DSM's Hyper Backup to another NAS/cloud target, pointed at
+`/volume1/docker/lugh/backups/`.
 
 ---
 

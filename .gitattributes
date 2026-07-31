@@ -1,0 +1,6 @@
+# Shell scripts run on Linux (NAS/VM) — must never get CRLF line endings
+# from a Windows checkout (core.autocrlf), or bash chokes on \r (shebang,
+# heredocs, comparisons all break in ways that are easy to miss on Windows
+# since `bash -n` here doesn't catch a bad line-ending, only a real Linux
+# bash does).
+*.sh text eol=lf

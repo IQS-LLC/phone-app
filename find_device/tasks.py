@@ -335,3 +335,23 @@ def archive_audit_log():
             logger.info("archive_audit_log: purged %d entries older than 90d", deleted)
     except Exception as exc:
         logger.error("archive_audit_log: error — %s", exc)
+
+
+@shared_task(name="find_device.tasks.backup_database", bind=True, max_retries=2, default_retry_delay=300)
+def backup_database(self):
+    """
+    pg_dump the database (see backup_db management command) and prune
+    backups older than BACKUP_RETENTION_DAYS. Runs daily at 03:00 UTC via
+    Beat — after archive_audit_log (02:00) so the two don't compete for
+    the same table locks.
+
+    A no-op (with a clear log line, not a silent skip) on the SQLite dev
+    fallback — only meaningful against the Postgres-backed dev/prod
+    stacks.
+    """
+    try:
+        from django.core.management import call_command
+        call_command("backup_db")
+    except Exception as exc:
+        logger.error("backup_database: error — %s", exc)
+        raise self.retry(exc=exc)
