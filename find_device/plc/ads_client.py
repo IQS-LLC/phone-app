@@ -76,7 +76,17 @@ class ADSClient:
     # notice and re-run add_route_to_plc by hand, connect() does it
     # automatically on failure — gated by a cooldown so a persistently
     # unreachable target doesn't get hammered with route-add attempts.
-    _ROUTE_REPAIR_COOLDOWN = 15.0
+    #
+    # 15s was too aggressive: re-registering a route can reset the target's
+    # route-table entry for that identity, which can knock out *any other*
+    # client currently using it (e.g. TwinCAT XAE's own engineering session,
+    # if it happens to share this identity). During a stretch where the CX
+    # was struggling to stay connected at all, this fired roughly every
+    # 60-70s (once the exponential backoff maxed out and looped), which was
+    # enough to repeatedly disrupt a live XAE session. 10 minutes is long
+    # enough that a genuinely cleared route still gets fixed automatically
+    # without being a repeated background disruption.
+    _ROUTE_REPAIR_COOLDOWN = 600.0
     _last_route_repair_attempt = 0.0
 
     def __init__(self, netid: str, ip: str, mock: bool = False):
@@ -112,6 +122,11 @@ class ADSClient:
         # ── Symbol handle cache ───────────────────────────────────────────────
         self._handle_cache: Dict[str, int] = {}
 
+        # Last exception from _open_and_verify(), used by connect() to decide
+        # whether a route repair could plausibly help (see
+        # _should_attempt_route_repair).
+        self._last_connect_exc: Optional[Exception] = None
+
     # =========================================================================
     # Connection lifecycle
     # =========================================================================
@@ -142,11 +157,12 @@ class ADSClient:
         if self._open_and_verify():
             return True
 
-        # open()/read_state() failed — this is exactly the symptom of a
-        # target that no longer has a route for this host (TwinCAT
-        # rebuilt/reactivated and reset its route table). Try to
-        # re-register automatically and retry once before giving up.
-        if self._try_auto_route_repair():
+        # open()/read_state() failed. Only worth trying an automatic route
+        # repair if the failure actually looks like a missing route (see
+        # _should_attempt_route_repair) — otherwise this just burns the
+        # repair cooldown on a target that repair can't fix, blocking a
+        # real route-loss from being repaired for the next 10 minutes.
+        if self._should_attempt_route_repair() and self._try_auto_route_repair():
             if self._open_and_verify():
                 logger.info(
                     "ADSClient: connected after automatic route repair  "
@@ -180,14 +196,38 @@ class ADSClient:
                 self._conn            = conn
                 self._connected        = True
                 self._connected_since  = time.monotonic()
+            self._last_connect_exc = None
             logger.info(
                 "ADSClient: connected  netid=%s  ip=%s", self.netid, self.ip
             )
             return True
         except Exception as exc:
+            self._last_connect_exc = exc
             self._record_error(str(exc))
             logger.error("ADSClient: connect failed: %s", exc)
             return False
+
+    # ADS error 7 ("Target machine not found - Missing ADS routes") is the
+    # one failure mode a route repair can actually fix — it means the AMS
+    # router genuinely has no route entry for us. Error 6 ("Target port not
+    # found - ADS Server not started") looks superficially similar but means
+    # something route-repair is powerless against: either the target's ADS
+    # router itself isn't reachable (device off/rebooting/network down —
+    # confirmed by raw TCP + ARP tests to be the common real-world cause
+    # here) or the PLC runtime just isn't started yet on a router that's
+    # otherwise fine. Repairing the route in either case can't help and
+    # only wastes the _ROUTE_REPAIR_COOLDOWN window that should be reserved
+    # for a genuine route-table reset.
+    _ROUTE_MISSING_CODES = frozenset({7})  # ADSERR_TARGET_MACHINE_NOT_FOUND
+
+    def _should_attempt_route_repair(self) -> bool:
+        exc = self._last_connect_exc
+        if isinstance(exc, pyads.ADSError):
+            return getattr(exc, "err_code", None) in self._ROUTE_MISSING_CODES
+        # Unknown/non-ADS exception (e.g. a raw socket error pyads didn't
+        # wrap) — keep the old behavior of trying a repair, since we don't
+        # have enough information to rule it out.
+        return True
 
     def _try_auto_route_repair(self) -> bool:
         """
