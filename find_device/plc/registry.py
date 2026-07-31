@@ -27,10 +27,12 @@ import threading
 from typing import Dict, List, Optional
 
 from .ads_client import ADSClient
+from .modbus_client import ModbusClient
 from .devices import (
     DaliChannel, WallRelay, SwitchInput,
     CurtainMotor, ApplianceRelay,
     MagneticSensor, MotionSensor, SecurityController,
+    pct_to_byte, byte_to_pct,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,19 @@ class DeviceRegistry:
             netid=os.getenv('PLC_NETID', '5.168.214.72.1.1'),
             ip   =os.getenv('PLC_IP',    '192.168.0.161'),
             mock =mock,
+        )
+
+        # Modbus fallback (TF6250 bridge — see GVL.TcGVL/POU_Modbus on the
+        # PLC side and modbus_client.py). Off by default: nothing should try
+        # to open a socket to a server that doesn't exist yet on the target
+        # until TF6250 is actually installed/licensed there. Same IP as ADS
+        # — same physical CX, different port — set once resolved in
+        # _start(). Only covers what POU_Modbus bridges: DALI 1-16, relay
+        # 1-4. Everything else (switches, sensors, curtains, appliances)
+        # has no Modbus path and is unaffected by any of this.
+        self._modbus_enabled = os.getenv('PLC_MODBUS_ENABLED', 'False').lower() == 'true'
+        self._modbus: Optional[ModbusClient] = (
+            ModbusClient(ip=self._client.ip, mock=mock) if self._modbus_enabled else None
         )
         self._dali:           Dict[int, DaliChannel]      = {}
         self._relays:         Dict[int, WallRelay]        = {}
@@ -107,6 +122,8 @@ class DeviceRegistry:
             if device is not None:
                 self._client.netid = device.ams_net_id
                 self._client.ip    = device.ip_address
+                if self._modbus is not None:
+                    self._modbus.ip = device.ip_address
                 logger.info(
                     "DeviceRegistry[apt%s]: using PLCDevice '%s' (%s @ %s)",
                     self.apartment_id, device.name,
@@ -126,6 +143,15 @@ class DeviceRegistry:
                 "the connection recovers.",
                 self.apartment_id, self._client.ip, self._client.netid,
             )
+
+        if self._modbus is not None:
+            if not self._modbus.connect():
+                logger.warning(
+                    "DeviceRegistry[apt%s]: Modbus fallback unreachable at %s "
+                    "(PLC_MODBUS_ENABLED=true but TF6250 may not be installed/"
+                    "licensed on the target yet) — ADS remains the only path "
+                    "until it connects.", self.apartment_id, self._modbus.ip,
+                )
 
         if apartment is not None:
             for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
@@ -235,6 +261,97 @@ class DeviceRegistry:
     def mock(self)      -> bool: return self._client.mock
     @property
     def connected(self) -> bool: return self._client.is_connected
+    @property
+    def modbus_connected(self) -> bool: return self._modbus is not None and self._modbus.is_connected
+
+    # ── ADS/Modbus fallback ───────────────────────────────────────────────────
+    # Only covers what POU_Modbus actually bridges on the PLC side: DALI
+    # channels 1-16 and relays 1-4 (see GVL.TcGVL). Everything else
+    # (switches, sensors, curtains, appliances) has no Modbus path and is
+    # untouched by any of this — ADS failures there behave exactly as
+    # before. self._modbus is None entirely unless PLC_MODBUS_ENABLED=true.
+
+    def _modbus_ready(self) -> bool:
+        return self._modbus is not None and self._modbus.is_connected
+
+    def read_dali_actual_pct(self, channel: int) -> Optional[int]:
+        """DALI actual level (0-100%). Falls back to Modbus if ADS fails."""
+        dev = self._dali.get(channel)
+        if dev is None:
+            return None
+        try:
+            return dev.read_actual_level()
+        except Exception as exc:
+            if not (self._modbus_ready() and 1 <= channel <= 16):
+                raise
+            logger.warning("DALI ch%d: ADS read failed (%s) — falling back to Modbus", channel, exc)
+            raw = self._modbus.read_dali_level(channel)
+            return None if raw is None else byte_to_pct(raw)
+
+    def write_dali_brightness(self, channel: int, percent: int):
+        """Set DALI brightness (0-100%). Falls back to Modbus if ADS fails."""
+        dev = self._dali.get(channel)
+        if dev is None:
+            raise ValueError(f"DALI channel {channel} not configured")
+        try:
+            dev.set_brightness(percent)
+        except Exception as exc:
+            if not (self._modbus_ready() and 1 <= channel <= 16):
+                raise
+            logger.warning("DALI ch%d: ADS write failed (%s) — falling back to Modbus", channel, exc)
+            if not self._modbus.write_dali_level(channel, pct_to_byte(percent)):
+                raise ConnectionError(f"DALI ch{channel}: both ADS and Modbus writes failed") from exc
+
+    def read_relay_actual(self, channel: int) -> Optional[bool]:
+        """Relay actual state (channel 1-4). Falls back to Modbus if ADS fails."""
+        dev = self._relays.get(channel)
+        if dev is None:
+            return None
+        try:
+            return dev.read_state()
+        except Exception as exc:
+            if not (self._modbus_ready() and 1 <= channel <= 4):
+                raise
+            logger.warning("Relay ch%d: ADS read failed (%s) — falling back to Modbus", channel, exc)
+            return self._modbus.read_relay(channel - 1)
+
+    def write_relay_state(self, channel: int, on: bool):
+        """Set relay state (channel 1-4). Falls back to Modbus if ADS fails."""
+        dev = self._relays.get(channel)
+        if dev is None:
+            raise ValueError(f"Relay channel {channel} not configured")
+        try:
+            dev.set_state(on)
+        except Exception as exc:
+            if not (self._modbus_ready() and 1 <= channel <= 4):
+                raise
+            logger.warning("Relay ch%d: ADS write failed (%s) — falling back to Modbus", channel, exc)
+            if not self._modbus.write_relay(channel - 1, on):
+                raise ConnectionError(f"Relay ch{channel}: both ADS and Modbus writes failed") from exc
+
+    def _fill_dali_gaps_from_modbus(self, levels: dict) -> dict:
+        if not self._modbus_ready():
+            return levels
+        filled = dict(levels)
+        for channel in self._dali:
+            if filled.get(channel) is not None or not (1 <= channel <= 16):
+                continue
+            raw = self._modbus.read_dali_level(channel)
+            if raw is not None:
+                filled[channel] = byte_to_pct(raw)
+        return filled
+
+    def _fill_relay_gaps_from_modbus(self, states: dict) -> dict:
+        if not self._modbus_ready():
+            return states
+        filled = dict(states)
+        for channel in self._relays:
+            if filled.get(channel) is not None or not (1 <= channel <= 4):
+                continue
+            val = self._modbus.read_relay(channel - 1)
+            if val is not None:
+                filled[channel] = val
+        return filled
 
     # ── Batched ADS read ──────────────────────────────────────────────────────
     # Folds N per-device ADS round trips into a single read_list_by_name() sum
@@ -281,8 +398,8 @@ class DeviceRegistry:
     # ── Full state read (hot path — called every 2 s by Flutter poll) ─────────
 
     def read_full_state(self) -> dict:
-        dali_levels  = self._batch_read_group(self._dali)
-        relay_states = self._batch_read_group(self._relays)
+        dali_levels  = self._fill_dali_gaps_from_modbus(self._batch_read_group(self._dali))
+        relay_states = self._fill_relay_gaps_from_modbus(self._batch_read_group(self._relays))
 
         # ADSClient._ensure_connected() now fails fast (no blocking
         # reconnect) when disconnected, so this is mostly a fast-path

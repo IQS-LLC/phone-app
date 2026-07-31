@@ -226,6 +226,12 @@ with exponential backoff (1 s → 2 s → ... → 60 s max).
 3. TCP 48898 and 851 must be reachable from the NAS to the CX
 4. TwinCAT must be in RUN state (ADS state 5)
 
+**Modbus TCP fallback (optional, off by default):** `find_device/plc/modbus_client.py`
++ `PLC_MODBUS_ENABLED=true` gives DALI 1-16 / relay 1-4 a second path via
+TF6250 (port 502) that survives AMS route/Secure-ADS failures ADS doesn't.
+See `docs/plc_proposals/modbus_bridge.md` — requires TF6250 installed and
+licensed on the CX8190 first; nothing connects until that env var is set.
+
 ---
 
 ## Role System

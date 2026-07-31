@@ -289,7 +289,7 @@ def set_dali_brightness(request, channel: int):
         return _err(f"DALI channel {channel} not configured", "NOT_FOUND", 404)
 
     try:
-        dev.set_brightness(pct)
+        r.write_dali_brightness(channel, pct)
         logger.info("DALI ch%d → %d%%", channel, pct)
         log_action(request, "dali_brightness", channel=channel, brightness=pct)
         return _ok({"channel": channel, "brightness": pct})
@@ -405,7 +405,7 @@ def set_relay(request, channel: int):
         return _err(f"Relay channel {channel} not configured", "NOT_FOUND", 404)
 
     try:
-        dev.set_state(on)
+        r.write_relay_state(channel, on)
         logger.info("Relay ch%d → %s", channel, "ON" if on else "OFF")
         log_action(request, "relay", channel=channel, on=on)
         return _ok({"channel": channel, "on": on})
