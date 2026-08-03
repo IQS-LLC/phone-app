@@ -42,16 +42,21 @@ x-django-env: &django-env
     DB_PASSWORD:  ${POSTGRES_PASSWORD}
     REDIS_URL:    redis://redis:6379/0
     DEBUG:        "false"
-    EXTRA_ALLOWED_HOSTS: "192.168.0.192,192.168.0.158,localhost"
-    PLC_MOCK:  "false"
-    PLC_IP:    "192.168.0.161"
-    PLC_NETID: "192.168.0.161.1.1"
-    PLC_PORT:  "851"
+    EXTRA_ALLOWED_HOSTS: ${EXTRA_ALLOWED_HOSTS:-192.168.0.192,192.168.0.158,localhost}
+    PLC_MOCK:  ${PLC_MOCK:-false}
+    PLC_IP:    ${PLC_IP:-192.168.0.161}
+    PLC_NETID: ${PLC_NETID:-192.168.0.161.1.1}
+    PLC_PORT:  ${PLC_PORT:-851}
     # This NAS's own AMS Net ID — must match the route registered on the CX
     # (TwinCAT System Manager Routes tab). Without it pyads defaults to an
     # unroutable local identity and real ADS connections fail on the target.
-    LOCAL_AMS_NET_ID: "192.168.0.158.1.1"
-    LOCAL_AMS_HOST:   "192.168.0.158"
+    # All six of these used to be hardcoded literals here instead of reading
+    # from .env like everything else — meaning setting them in .env
+    # silently had no effect. Found while deploying to a fresh VM: .env had
+    # the right LOCAL_AMS_NET_ID, the running container had the placeholder
+    # example value instead.
+    LOCAL_AMS_NET_ID: ${LOCAL_AMS_NET_ID:-192.168.0.158.1.1}
+    LOCAL_AMS_HOST:   ${LOCAL_AMS_HOST:-192.168.0.158}
     # Same credentials used to log into TwinCAT/the CX's embedded OS — lets
     # ADSClient auto-repair its AMS route on the target when TwinCAT resets
     # it (rebuild/reactivate/redownload clears dynamic routes). Without
@@ -63,7 +68,7 @@ x-django-env: &django-env
     PLC_ROUTE_PASSWORD: ${PLC_ROUTE_PASSWORD}
     # Subnets to scan when the installer uses the Commissioning Wizard's
     # "Discover PLCs" step. Comma-separated CIDR notation.
-    PLC_DISCOVERY_SUBNETS: "192.168.0.0/24"
+    PLC_DISCOVERY_SUBNETS: ${PLC_DISCOVERY_SUBNETS:-192.168.0.0/24}
     WEB_CONCURRENCY: "1"
     # Modbus TCP fallback (TF6250) — see docs/plc_proposals/modbus_bridge.md.
     # Leave false until TF6250 is installed/licensed on the CX; defaults

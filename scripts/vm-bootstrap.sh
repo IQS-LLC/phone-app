@@ -99,6 +99,11 @@ for d in postgres_data redis_data static media backups; do
   mkdir -p "$LUGH_ROOT/$d"
 done
 chmod 750 "$LUGH_ROOT"
+# The django container runs as a non-root user pinned to uid/gid 1000
+# (see Dockerfile) — static/media/backups are bind-mounted over that
+# user's writable directories, so they need matching host-side ownership
+# or collectstatic and backup_db fail with PermissionError.
+chown -R 1000:1000 "$LUGH_ROOT/static" "$LUGH_ROOT/media" "$LUGH_ROOT/backups"
 success "Directories created"
 
 # ── 4. Collect secrets ─────────────────────────────────────────────────────────

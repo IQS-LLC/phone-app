@@ -327,6 +327,11 @@ chmod +x /usr/local/etc/rc.d/fix-docker-sock.sh
 ```bash
 mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media,backups}
 chmod 750 /volume1/docker/lugh
+# django runs as a non-root user pinned to uid/gid 1000 (see Dockerfile).
+# static/media/backups are bind-mounted over that user's writable dirs —
+# without matching ownership here, collectstatic and backup_db fail with
+# PermissionError the moment the container starts.
+chown -R 1000:1000 /volume1/docker/lugh/{static,media,backups}
 ls -la /volume1/docker/lugh/
 ```
 
@@ -605,22 +610,22 @@ curl -fsSL \
 
 ### 5.3 Edit docker-compose.prod.yml for Your Environment
 
-Open the compose file and verify these values match your `.env`:
+Every environment-specific value (`EXTRA_ALLOWED_HOSTS`, `PLC_IP`, `PLC_NETID`,
+`PLC_DISCOVERY_SUBNETS`, `LOCAL_AMS_HOST`, `LOCAL_AMS_NET_ID`, `PLC_MOCK`,
+`PLC_PORT`) is read from `.env` via `${VARIABLE:-default}` substitution — you
+should not need to open or edit `docker-compose.prod.yml` itself for a normal
+deployment. Set everything in `.env` (Section 5.1) instead.
 
-```bash
-nano /volume1/docker/lugh/docker-compose.prod.yml
-```
+This wasn't always true — earlier versions of this file hardcoded these as
+literal placeholder values directly in the `x-django-env` block, so setting
+them in `.env` silently had no effect (caught during a real VM deployment:
+`.env` had the correct `LOCAL_AMS_NET_ID`, the running container had the old
+`192.168.0.158.1.1` placeholder instead). If you're working from an older
+checkout, `git pull` first.
 
-Look for and confirm:
-```yaml
-environment:
-  EXTRA_ALLOWED_HOSTS: "<NAS_IP>,<TUNNEL_DOMAIN>"
-  PLC_IP:    "<PLC_IP>"
-  PLC_NETID: "<PLC_AMS_NET_ID>"
-  PLC_DISCOVERY_SUBNETS: "<LAN_SUBNET>"
-```
-
-> 💡 The compose file reads most values from `.env` via `${VARIABLE}` substitution. If a value is hardcoded in the compose file, it overrides `.env`. The IP-related values are sourced from `.env` — you should not need to edit the compose file directly for network changes.
+Only open the compose file directly if you need to change something
+structural (a port mapping, a volume path, adding a service) — not for any
+of the values above.
 
 ### 5.4 Pull Images and Start the Stack
 

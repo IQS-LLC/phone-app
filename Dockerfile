@@ -32,8 +32,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed Python packages from builder
 COPY --from=builder /install /usr/local
 
-# Non-root application user
-RUN groupadd -r django && useradd -r -g django django
+# Non-root application user — UID/GID pinned (not auto-assigned) so it's
+# stable across rebuilds. Matters because docker-compose bind-mounts host
+# directories over /app/staticfiles and /app/media in production; those
+# host directories need to be chowned to this same UID/GID (see
+# DEPLOYMENT_MANUAL.md), which only works if the UID doesn't drift between
+# image builds.
+RUN groupadd -r -g 1000 django && useradd -r -u 1000 -g django django
 RUN mkdir -p /app/staticfiles /app/media && chown -R django:django /app
 
 # Copy application source
