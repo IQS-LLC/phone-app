@@ -776,8 +776,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(
               icon: Icons.memory_rounded, label: 'PLC Mode',
-              value: s.state.mock ? 'Mock PLC' : 'Real PLC',
-              valueColor: s.state.mock ? C.orange : C.green, badge: true,
+              value: !s.hasLiveState ? 'Unknown' : (s.state.mock ? 'Mock PLC' : 'Real PLC'),
+              valueColor: !s.hasLiveState ? C.textTri : (s.state.mock ? C.orange : C.green),
+              badge: true,
             ),
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(

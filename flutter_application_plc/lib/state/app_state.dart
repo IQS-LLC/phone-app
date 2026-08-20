@@ -84,6 +84,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   ConnectionQuality get connectionQuality =>
       _connected ? _latencyToQuality(_lastLatencyMs) : ConnectionQuality.none;
 
+  // True only once a poll has actually parsed a real JSON payload from the
+  // server into [_state] — i.e. [_connectivityStatus] is `ok` or `plcDown`,
+  // the only two values _classifyConnectivity() can return when
+  // serverReachable was true. Anything reading fields off [_state] to show
+  // the user a specific-looking fact (PLC mode, apartment id) must check
+  // this first: SystemState.empty and SystemState.fromJson's own fallbacks
+  // both default `mock` to `true` and `apartmentId` to `16`, so a screen
+  // that renders those fields unconditionally can assert "Mock PLC" —a
+  // specific, false claim — while genuinely disconnected. Same anti-pattern
+  // as the apartment-name-from-raw-id bug, just on a different field.
+  bool get hasLiveState =>
+      _connectivityStatus == ConnectivityStatus.ok ||
+      _connectivityStatus == ConnectivityStatus.plcDown;
+
   // ── System state ───────────────────────────────────────────────────────────
   SystemState _state = SystemState.empty;
   SystemState get state => _state;
