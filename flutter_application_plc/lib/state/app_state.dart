@@ -147,7 +147,17 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // 15-25s when the PLC is timing out, but the timer still fires every 2s
   // (or 6s backed off) regardless — without this, each tick starts a new
   // request on top of ones still in flight, unboundedly.
-  bool   _polling            = false;
+  //
+  // This is a Future, not a bool, so a caller that awaits _poll() while one
+  // is already running gets the SAME real result instead of an instant
+  // silent no-op. Found live 2026-08-20: Settings' "Save & Reconnect"
+  // called AppState.refresh() right after a URL change, but the config-
+  // change listener had already kicked off its own poll a moment earlier —
+  // with a bool guard, refresh()'s await returned immediately (poll already
+  // "in progress"), so the UI reported "couldn't reach the server" from
+  // stale pre-reconnect state a fraction of a second before the real,
+  // successful poll result would have arrived.
+  Future<void>? _inFlightPoll;
 
   // Was 2s. Tightened to 1s — as fast as this specific PLC's ADS layer can
   // safely sustain. Went deep on this 2026-08-19: the CX8190 here is
@@ -268,15 +278,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   /// lists, pending optimistic writes, connectivity status. Called once
   /// from the constructor and again every time [_onConfigChanged] fires.
   ///
-  /// Also resets [_polling] to false: a request against the *old* API
-  /// instance may still be in flight when this runs. That request is not
+  /// Also drops [_inFlightPoll]: a request against the *old* API instance
+  /// may still be running when this executes. That request is not
   /// cancelled (Dart's http package has no cheap cancellation here), but
   /// _poll()'s own version check discards its result when it eventually
-  /// resolves, and resetting the gate here means the discard doesn't also
-  /// block the fresh poll this method triggers from ever starting.
+  /// resolves, and dropping the reference here means the next _poll() call
+  /// starts a genuinely fresh request instead of coalescing onto the
+  /// now-pointless old one.
   void _rebuildForConfig({required bool logConnecting}) {
     _api = ApiService(_config.serverUrl, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
-    _polling            = false;
+    _inFlightPoll       = null;
     _connected          = false;
     _connecting         = true;
     _connectivityStatus = ConnectivityStatus.connecting;
@@ -315,9 +326,27 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Polling ────────────────────────────────────────────────────────────────
 
-  Future<void> _poll() async {
-    if (_polling) return;
-    _polling = true;
+  /// Coalescing wrapper: if a poll is already running, every caller
+  /// (the periodic timer, didChangeAppLifecycleState, _onConfigChanged,
+  /// and refresh()) gets the SAME Future and therefore the SAME real
+  /// result once it lands, instead of a second call silently resolving
+  /// with nothing while the first is still in flight.
+  Future<void> _poll() {
+    final existing = _inFlightPoll;
+    if (existing != null) return existing;
+    final mine = _doPoll();
+    _inFlightPoll = mine;
+    mine.whenComplete(() {
+      // Only clear if we're still the current in-flight poll — a config
+      // change may have already dropped this reference (see
+      // _rebuildForConfig) and started a newer one under a fresh Future,
+      // which this stale completion must not clobber.
+      if (identical(_inFlightPoll, mine)) _inFlightPoll = null;
+    });
+    return mine;
+  }
+
+  Future<void> _doPoll() async {
     // Captured before the await — if RuntimeConfig changes while this
     // request is in flight, _config.version will have moved on by the time
     // it resolves. That response belongs to a server the user has already
@@ -326,76 +355,68 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     // already reported. See RuntimeConfig's doc comment and Scenario C/F
     // in the 2026-08-20 hardening pass.
     final requestVersion = _config.version;
-    try {
-      final result       = await _api.getState();
-      if (requestVersion != _config.version) {
-        // Stale — a newer config change superseded this request while it
-        // was in flight. _rebuildForConfig() already reset _polling and
-        // kicked off a fresh, current poll; this one has nothing left to
-        // do and must not touch _connected/_state/_polling.
-        return;
-      }
-      final wasConnected = _connected;
-      final prevStatus    = _connectivityStatus;
-      _connecting        = false;
-      _lastLatencyMs     = result.latencyMs;
-
-      final serverReachable = result.success && result.data != null;
-      if (serverReachable) {
-        _state = SystemState.fromJson(result.data!);
-
-        // Clear optimistic updates that the server has confirmed
-        _pendingBrightness.removeWhere((ch, pct) => _state.dali[ch] == pct);
-        _pendingRelay.removeWhere((ch, on) => _state.relays[ch] == on);
-        _pendingCurtain.removeWhere((idx, cmd) => _state.curtains[idx] == cmd);
-        _pendingAppliance.removeWhere((name, on) => _state.appliances[name] == on);
-        _pendingToggle.removeWhere((name, on) => _state.toggles[name] == on);
-        if (_pendingAlarm    != null && _state.security.armed    == _pendingAlarm!)    _pendingAlarm    = null;
-        if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
-      }
-
-      // "Connected" must mean the PLC itself is reachable, not just that the
-      // HTTP round trip to Django succeeded — a healthy server can still
-      // return plc_connected:false (every device value null) while this
-      // app happily reported "Connected" and silently rendered every null
-      // device state as OFF (?? false), which is actively misleading during
-      // a real outage. Found live 2026-08-20 during QA: the PLC dropped
-      // mid-session and the dashboard kept showing a green "Connected"
-      // badge with stale/false states the whole time.
-      _connected = serverReachable && _state.plcConnected;
-      _connectivityStatus = _classifyConnectivity(result, serverReachable);
-      _connectivityDebugDetail = result.debugDetail;
-
-      if (!wasConnected && _connected) {
-        _failStreak = 0;
-        _addLog('Connected  (${result.latencyMs}ms)');
-      }
-      if (prevStatus != _connectivityStatus) {
-        if (_connectivityStatus != ConnectivityStatus.ok) {
-          final detail = result.debugDetail;
-          _addLog(
-            _connectivityStatus.shortLabel +
-                (detail != null ? ' ($detail)' : ''),
-            isError: true,
-          );
-        }
-      }
-
-      _failStreak = _connected ? 0 : _failStreak + 1;
-
-      // Device list/config comes from the DB, not live PLC data — load it
-      // as soon as the server itself is reachable so the room/device grid
-      // still renders during a PLC outage instead of staying empty.
-      if (serverReachable && !_initializedDevices) await _loadDevices();
-
-      notifyListeners();
-    } finally {
-      // Only release the gate if this is still the current config
-      // generation. If a config change happened mid-request, _rebuildForConfig
-      // already reset _polling (and a fresh poll may already be running
-      // under it) — this stale request must not stomp on that.
-      if (requestVersion == _config.version) _polling = false;
+    final result = await _api.getState();
+    if (requestVersion != _config.version) {
+      // Stale — a newer config change superseded this request while it was
+      // in flight. _rebuildForConfig() already dropped _inFlightPoll and a
+      // fresh poll may already be running under it; this one has nothing
+      // left to do and must not touch _connected/_state.
+      return;
     }
+    final wasConnected = _connected;
+    final prevStatus   = _connectivityStatus;
+    _connecting        = false;
+    _lastLatencyMs     = result.latencyMs;
+
+    final serverReachable = result.success && result.data != null;
+    if (serverReachable) {
+      _state = SystemState.fromJson(result.data!);
+
+      // Clear optimistic updates that the server has confirmed
+      _pendingBrightness.removeWhere((ch, pct) => _state.dali[ch] == pct);
+      _pendingRelay.removeWhere((ch, on) => _state.relays[ch] == on);
+      _pendingCurtain.removeWhere((idx, cmd) => _state.curtains[idx] == cmd);
+      _pendingAppliance.removeWhere((name, on) => _state.appliances[name] == on);
+      _pendingToggle.removeWhere((name, on) => _state.toggles[name] == on);
+      if (_pendingAlarm    != null && _state.security.armed    == _pendingAlarm!)    _pendingAlarm    = null;
+      if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
+    }
+
+    // "Connected" must mean the PLC itself is reachable, not just that the
+    // HTTP round trip to Django succeeded — a healthy server can still
+    // return plc_connected:false (every device value null) while this
+    // app happily reported "Connected" and silently rendered every null
+    // device state as OFF (?? false), which is actively misleading during
+    // a real outage. Found live 2026-08-20 during QA: the PLC dropped
+    // mid-session and the dashboard kept showing a green "Connected"
+    // badge with stale/false states the whole time.
+    _connected = serverReachable && _state.plcConnected;
+    _connectivityStatus = _classifyConnectivity(result, serverReachable);
+    _connectivityDebugDetail = result.debugDetail;
+
+    if (!wasConnected && _connected) {
+      _failStreak = 0;
+      _addLog('Connected  (${result.latencyMs}ms)');
+    }
+    if (prevStatus != _connectivityStatus) {
+      if (_connectivityStatus != ConnectivityStatus.ok) {
+        final detail = result.debugDetail;
+        _addLog(
+          _connectivityStatus.shortLabel +
+              (detail != null ? ' ($detail)' : ''),
+          isError: true,
+        );
+      }
+    }
+
+    _failStreak = _connected ? 0 : _failStreak + 1;
+
+    // Device list/config comes from the DB, not live PLC data — load it
+    // as soon as the server itself is reachable so the room/device grid
+    // still renders during a PLC outage instead of staying empty.
+    if (serverReachable && !_initializedDevices) await _loadDevices();
+
+    notifyListeners();
   }
 
   /// Maps one getState() result onto a specific reason, instead of the
