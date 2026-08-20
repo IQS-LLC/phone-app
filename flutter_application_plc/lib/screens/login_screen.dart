@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
 import '../config.dart';
+import '../state/app_state.dart';
 import '../theme.dart';
 import '../widgets/common_widgets.dart';
 
@@ -13,7 +14,8 @@ import '../widgets/common_widgets.dart';
 
 class LoginScreen extends StatefulWidget {
   final AuthState authState;
-  const LoginScreen({super.key, required this.authState});
+  final AppState  appState;
+  const LoginScreen({super.key, required this.authState, required this.appState});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -52,12 +54,21 @@ class _LoginScreenState extends State<LoginScreen>
   Future<void> _submit() async {
     _auth.clearError();
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    final serverUrl = await AppConfig.resolve();
     final ok = await _auth.login(
       username:  _userCtrl.text.trim(),
       password:  _passCtrl.text,
-      serverUrl: await AppConfig.resolve(),
+      serverUrl: serverUrl,
     );
-    if (!ok && mounted) {
+    if (ok) {
+      // AppState is constructed once at cold start with whatever URL was
+      // resolved then. If the user just recovered from a dead tunnel via
+      // the Advanced sheet below, that's a different (newer) URL than the
+      // one AppState has been polling with — without this, login succeeds
+      // but the dashboard keeps silently polling the old dead address
+      // forever. setBaseUrl() is a no-op when the URL hasn't changed.
+      widget.appState.setBaseUrl(serverUrl);
+    } else if (mounted) {
       AppToast.show(context, _auth.error ?? 'Login failed', error: true);
     }
   }

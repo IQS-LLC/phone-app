@@ -92,7 +92,7 @@ class _AuthGate extends StatelessWidget {
 
         // Not logged in — show login
         if (!authState.isAuth) {
-          return LoginScreen(authState: authState);
+          return LoginScreen(authState: authState, appState: appState);
         }
 
         // Authenticated — show dashboard. AppState's server URL comes only
