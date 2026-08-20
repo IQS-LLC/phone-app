@@ -51,8 +51,8 @@ class LightRelabelService {
       return {'ok': false, 'error': 'No connection to server'};
     } on TimeoutException {
       return {'ok': false, 'error': 'Request timed out'};
-    } catch (e) {
-      return {'ok': false, 'error': e.toString()};
+    } catch (_) {
+      return {'ok': false, 'error': "Can't reach the server. Check your connection."};
     }
   }
 
@@ -75,8 +75,8 @@ class LightRelabelService {
       return {'ok': false, 'error': 'No connection to server'};
     } on TimeoutException {
       return {'ok': false, 'error': 'Request timed out'};
-    } catch (e) {
-      return {'ok': false, 'error': e.toString()};
+    } catch (_) {
+      return {'ok': false, 'error': "Can't reach the server. Check your connection."};
     }
   }
 

@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../auth/auth_state.dart';
+import '../models/device_state.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../theme.dart';
+import '../utils/room_display.dart';
 import '../widgets/common_widgets.dart';
 
 /// Ventilators, balcony/mirror/var lights and the other fixtures that were
@@ -35,8 +37,13 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
 
   List<ToggleDevice> _devices = [];
   Map<String, bool?> _states = {};
+  bool _plcConnected = false;
   final Set<String> _pending = {};
   Timer? _pollTimer;
+
+  DeviceState _stateOf(String varName) => resolveDeviceState(
+        pending: null, raw: _states[varName], systemConnected: _plcConnected,
+      );
 
   @override
   void initState() {
@@ -91,6 +98,7 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
       _loading = false;
       _loadError = null;
       _states = raw.map((k, v) => MapEntry(k, v as bool?));
+      _plcConnected = r.data!['plc_connected'] as bool? ?? false;
     });
   }
 
@@ -150,7 +158,7 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
                         for (final entry in _grouped.entries) ...[
                           Padding(
                             padding: const EdgeInsets.fromLTRB(4, 12, 4, 8),
-                            child: Text(entry.key.toUpperCase(), style: AppText.bodySm.copyWith(
+                            child: Text(RoomDisplay.label(entry.key).toUpperCase(), style: AppText.bodySm.copyWith(
                               color: C.textTri, fontWeight: FontWeight.w600, letterSpacing: 0.5,
                             )),
                           ),
@@ -160,7 +168,7 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
                                 if (i > 0) const Divider(height: 0.5, thickness: 0.5, color: C.border),
                                 _UtilityRow(
                                   device: entry.value[i],
-                                  on: _states[entry.value[i].varName] ?? false,
+                                  state: _stateOf(entry.value[i].varName),
                                   busy: _pending.contains(entry.value[i].varName),
                                   onChanged: (v) => _setToggle(entry.value[i], v),
                                 ),
@@ -176,16 +184,19 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
 
 class _UtilityRow extends StatelessWidget {
   final ToggleDevice device;
-  final bool on;
+  final DeviceState state;
   final bool busy;
   final ValueChanged<bool> onChanged;
 
   const _UtilityRow({
     required this.device,
-    required this.on,
+    required this.state,
     required this.busy,
     required this.onChanged,
   });
+
+  bool get on => state.isOn;
+  bool get known => state.isKnown;
 
   IconData get _icon {
     final n = device.name.toLowerCase();
@@ -203,33 +214,37 @@ class _UtilityRow extends StatelessWidget {
         Container(
           width: 32, height: 32,
           decoration: BoxDecoration(
-            color: (on ? C.accent : C.textTri).withAlpha(18),
+            color: (on ? C.accent : (known ? C.textTri : C.orange)).withAlpha(18),
             borderRadius: BorderRadius.circular(10),
           ),
-          child: Icon(_icon, color: on ? C.accent : C.textTri, size: 16),
+          child: Icon(known ? _icon : Icons.help_outline_rounded,
+              color: on ? C.accent : (known ? C.textTri : C.orange), size: 16),
         ),
         const SizedBox(width: 12),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(device.name, style: AppText.bodyMed),
-            if (!device.writable)
+            if (!known)
+              Text(state == DeviceState.unavailable ? 'Hardware unreachable' : 'State unknown',
+                  style: AppText.bodySm.copyWith(color: C.orange))
+            else if (!device.writable)
               Text('Automatic — follows its sensor', style: AppText.bodySm.copyWith(color: C.textTri)),
           ]),
         ),
         if (busy)
           const SizedBox(width: 18, height: 18,
               child: CircularProgressIndicator(strokeWidth: 2, color: C.accent))
-        else if (device.writable)
+        else if (device.writable && known)
           Switch(value: on, activeThumbColor: C.accent, onChanged: onChanged)
         else
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: (on ? C.green : C.textTri).withAlpha(18),
+              color: (on ? C.green : (known ? C.textTri : C.orange)).withAlpha(18),
               borderRadius: BorderRadius.circular(20),
             ),
-            child: Text(on ? 'ON' : 'OFF', style: AppText.bodySm.copyWith(
-              color: on ? C.green : C.textTri, fontWeight: FontWeight.w600,
+            child: Text(known ? (on ? 'ON' : 'OFF') : state.label, style: AppText.bodySm.copyWith(
+              color: on ? C.green : (known ? C.textTri : C.orange), fontWeight: FontWeight.w600,
             )),
           ),
       ]),

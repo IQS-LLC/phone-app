@@ -37,6 +37,7 @@ import logging
 import threading
 import time
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (
@@ -71,6 +72,13 @@ class ScanCancelled(Exception):
     pass
 
 
+class ScanAlreadyRunning(Exception):
+    """Raised when the DB's one-running-scan-per-apartment constraint (see
+    ScanRun.Meta) rejects a concurrent start — the real, race-proof version
+    of the view's .exists() pre-check, which only closes the common case."""
+    pass
+
+
 def start_scan(apartment, mode: str, user) -> ScanRun:
     """
     Create the ScanRun row and launch the engine on a background daemon
@@ -78,7 +86,11 @@ def start_scan(apartment, mode: str, user) -> ScanRun:
     poll GET .../status/<id>/ for progress, or flip cancel_requested for
     STOP SCAN.
     """
-    run = ScanRun.objects.create(apartment=apartment, mode=mode, started_by=user)
+    try:
+        with transaction.atomic():
+            run = ScanRun.objects.create(apartment=apartment, mode=mode, started_by=user)
+    except IntegrityError as exc:
+        raise ScanAlreadyRunning() from exc
     threading.Thread(target=_run_in_background, args=(run.pk,), daemon=True).start()
     return run
 
@@ -242,23 +254,41 @@ class SuperScanEngine:
         self, device_type, identifier, direction, data_type, valid_range,
         name, room, apartment_device, value,
     ) -> DiscoveredCapability:
+        read_ok = value is not None
+        defaults = dict(
+            apartment_device=apartment_device,
+            name=name or identifier,
+            room=room or "",
+            direction=direction,
+            is_known_type=True,
+            raw_var_name="",
+            data_type=data_type,
+            valid_range=valid_range,
+            can_safely_test=(direction == "output" and device_type in ACTIVE_TEST_TYPES),
+            last_seen_scan=self.run,
+            still_present=True,
+        )
+        if read_ok:
+            defaults["last_value"] = str(value)
+            defaults["confidence"] = "high"
+        else:
+            # A transient read failure must NEVER destroy the last confirmed
+            # value — that's exactly the "temporary outage makes a healthy
+            # device look broken" failure mode this project hit live. Omit
+            # last_value from defaults entirely: update_or_create leaves an
+            # existing row's value untouched, and a brand-new row falls back
+            # to the field's own "" default — either way nothing is
+            # overwritten with a false reading. still_present stays True
+            # (the row is still touched this scan, from the DB-backed
+            # ApartmentDevice list, independent of whether the live read
+            # worked) so it's never wrongly marked "removed" below either.
+            # confidence drops to "low" so the dashboard can visibly flag a
+            # stale reading instead of presenting it as freshly confirmed.
+            defaults["confidence"] = "low"
+
         cap, _created = DiscoveredCapability.objects.update_or_create(
             apartment=self.apartment, device_type=device_type, identifier=identifier,
-            defaults=dict(
-                apartment_device=apartment_device,
-                name=name or identifier,
-                room=room or "",
-                direction=direction,
-                is_known_type=True,
-                raw_var_name="",
-                data_type=data_type,
-                valid_range=valid_range,
-                confidence="high",
-                can_safely_test=(direction == "output" and device_type in ACTIVE_TEST_TYPES),
-                last_value="" if value is None else str(value),
-                last_seen_scan=self.run,
-                still_present=True,
-            ),
+            defaults=defaults,
         )
         if cap.test_status == DiscoveredCapability.TEST_NOT_TESTED:
             cap.test_status = DiscoveredCapability.TEST_OBSERVED
@@ -335,12 +365,38 @@ class SuperScanEngine:
                 cap = DiscoveredCapability.objects.get(
                     apartment=self.apartment, device_type=device_type, identifier=identifier,
                 )
+
+                # Check connectivity BEFORE attempting — if the PLC is
+                # already known down, don't burn a round trip finding that
+                # out per-device (that's the "retry storm" pattern the
+                # audit flagged) and, more importantly, don't record it as
+                # TEST_FAILED: that reads to a technician as "this device is
+                # broken" when the truth is "we never got to ask it."
+                if not registry.connected:
+                    cap.test_status = DiscoveredCapability.TEST_UNAVAILABLE
+                    cap.save(update_fields=["test_status"])
+                    CapabilityTestLog.objects.create(
+                        capability=cap, scan_run=self.run,
+                        command_sent="", params={}, state_before="", state_after="",
+                        response="skipped — PLC unavailable", success=False,
+                        latency_ms=None, error="PLC disconnected before this test could run",
+                    )
+                    tested += 1
+                    failed += 1
+                    continue
+
                 success, log_kwargs = self._safe_active_test(device_type, obj)
                 tested += 1
                 if success:
                     passed += 1
                     cap.test_status = DiscoveredCapability.TEST_PASSED
                     cap.physical_effect_confirmed = True
+                elif not registry.connected:
+                    # The test itself is what revealed the PLC dropped —
+                    # same "not the device's fault" distinction as above,
+                    # discovered mid-attempt instead of before it.
+                    failed += 1
+                    cap.test_status = DiscoveredCapability.TEST_UNAVAILABLE
                 else:
                     failed += 1
                     cap.test_status = DiscoveredCapability.TEST_FAILED

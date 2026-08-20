@@ -23,21 +23,44 @@ class ApiResult<T> {
   final ApiErrorCode? errorCode;
   final int          latencyMs;
 
+  /// HTTP status code, when a response was actually received (null for
+  /// network-level failures that never reached the server).
+  final int? statusCode;
+
+  /// The backend's own machine-readable error code from the response body
+  /// — e.g. "NO_APARTMENT", "UNAUTHORIZED", "PLC_ERROR" (see
+  /// find_device/views.py's _err() and middleware.py). This is what lets
+  /// AppState classify *why* a request failed instead of collapsing every
+  /// non-200 into one generic "Offline".
+  final String? backendCode;
+
+  /// Raw technical detail (exception text, stack-shaped strings) for
+  /// logs/diagnostics ONLY — never render this in UI copy. [errorMessage]
+  /// is always the safe, user-facing string; this is its unfiltered
+  /// origin, kept around so Activity/SuperScan-style diagnostics can still
+  /// show the real cause without putting it in a resident's face directly.
+  final String? debugDetail;
+
   const ApiResult._({
     required this.latencyMs,
     this.data,
     this.errorMessage,
     this.errorCode,
+    this.statusCode,
+    this.backendCode,
+    this.debugDetail,
   });
 
   factory ApiResult.ok(T data, int latencyMs) => ApiResult._(
-    data: data, latencyMs: latencyMs,
+    data: data, latencyMs: latencyMs, statusCode: 200,
   );
 
   factory ApiResult.err(
-    String message, ApiErrorCode code, int latencyMs,
-  ) => ApiResult._(
+    String message, ApiErrorCode code, int latencyMs, {
+    int? statusCode, String? backendCode, String? debugDetail,
+  }) => ApiResult._(
     errorMessage: message, errorCode: code, latencyMs: latencyMs,
+    statusCode: statusCode, backendCode: backendCode, debugDetail: debugDetail,
   );
 
   bool get success   => errorCode == null;
@@ -91,11 +114,13 @@ class ApiService {
       final json = jsonDecode(response.body) as Map<String, dynamic>;
       return ApiResult.ok(json, ms);
     }
-    final errMsg = _extractErrorMessage(response.body, response.statusCode);
+    final (errMsg, backendCode) = _extractError(response.body, response.statusCode);
     return ApiResult.err(
       errMsg,
       response.statusCode >= 500 ? ApiErrorCode.serverError : ApiErrorCode.clientError,
       ms,
+      statusCode: response.statusCode,
+      backendCode: backendCode,
     );
   }
 
@@ -311,26 +336,31 @@ class ApiService {
         latencyMs:    sw.elapsedMilliseconds,
         errorMessage: 'Connection timed out after ${_testTimeout.inSeconds}s.',
       );
-    } catch (e) {
+    } catch (_) {
       sw.stop();
       return ConnectionTestResult(
         reachable:    false,
         latencyMs:    sw.elapsedMilliseconds,
-        errorMessage: e.toString(),
+        errorMessage: "Can't reach the server. Check the address and your connection.",
       );
     }
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
 
-  static String _extractErrorMessage(String body, int statusCode) {
+  /// Returns (user-facing message, backend machine code or null). The
+  /// backend always responds with {"error": ..., "code": ...} on failure
+  /// (see find_device/views.py _err() and middleware.py) — code is what
+  /// lets AppState tell NO_APARTMENT apart from PLC_ERROR apart from a
+  /// plain 500, instead of every non-2xx collapsing into one generic
+  /// message.
+  static (String, String?) _extractError(String body, int statusCode) {
     try {
       final j = jsonDecode(body) as Map<String, dynamic>;
-      return j['error'] as String?
-          ?? j['detail'] as String?
-          ?? 'Server error ($statusCode)';
+      final msg = j['error'] as String? ?? j['detail'] as String? ?? 'Server error ($statusCode)';
+      return (msg, j['code'] as String?);
     } catch (_) {
-      return 'Server error ($statusCode)';
+      return ('Server error ($statusCode)', null);
     }
   }
 
@@ -338,16 +368,25 @@ class ApiService {
     Object? e, int ms,
   ) {
     if (e is SocketException) {
-      return ApiResult.err('No connection to server', ApiErrorCode.network, ms);
+      return ApiResult.err('No connection to server', ApiErrorCode.network, ms, debugDetail: e.toString());
     }
     if (e is TimeoutException) {
-      return ApiResult.err('Request timed out', ApiErrorCode.timeout, ms);
+      return ApiResult.err('Request timed out', ApiErrorCode.timeout, ms, debugDetail: e.toString());
     }
     if (e is FormatException) {
-      return ApiResult.err('Invalid server response', ApiErrorCode.parseError, ms);
+      return ApiResult.err('Invalid server response', ApiErrorCode.parseError, ms, debugDetail: e.toString());
     }
+    // Catch-all for anything else (http.ClientException wrapping a DNS
+    // failure, TLS handshake errors, etc.) — never surface e.toString()
+    // directly in UI copy. Found live 2026-08-20: a stale tunnel hostname
+    // produced a multi-line "ClientException with SocketException: Failed
+    // host lookup… errno = 7…" string that used to render verbatim on the
+    // login screen. The raw detail is kept in debugDetail for logs/
+    // diagnostics, just never shown to the user.
     return ApiResult.err(
-      e?.toString() ?? 'Unknown error', ApiErrorCode.unknown, ms,
+      "Can't reach the server. Check your connection.",
+      ApiErrorCode.unknown, ms,
+      debugDetail: e?.toString(),
     );
   }
 }

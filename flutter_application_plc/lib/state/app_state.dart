@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
+import '../models/connectivity_status.dart';
+import '../models/device_state.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
 import '../theme.dart';
@@ -55,10 +57,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   int    _ticksSinceAttempt = 0;
   int?   _lastLatencyMs;
 
+  // WHY the last poll wasn't a clean success — the classification the old
+  // bare `connected` bool couldn't express, collapsing "no apartment
+  // assigned" and "PLC unplugged" and "phone has no internet" into the
+  // same generic "Offline". See ConnectivityStatus doc comments for what
+  // each value means and _classifyConnectivity for how a poll result
+  // becomes one of them.
+  ConnectivityStatus _connectivityStatus = ConnectivityStatus.connecting;
+  String? _connectivityDebugDetail; // raw exception text, diagnostics only — never shown in UI
+
   bool              get connected       => _connected;
   bool              get connecting      => _connecting;
   int               get failStreak      => _failStreak;
   int?              get lastLatencyMs   => _lastLatencyMs;
+  ConnectivityStatus get connectivityStatus => _connectivityStatus;
+  String?           get connectivityDebugDetail => _connectivityDebugDetail;
   ConnectionQuality get connectionQuality =>
       _connected ? _latencyToQuality(_lastLatencyMs) : ConnectionQuality.none;
 
@@ -201,6 +214,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _api                = ApiService(url, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
     _connected          = false;
     _connecting         = true;
+    _connectivityStatus = ConnectivityStatus.connecting;
+    _connectivityDebugDetail = null;
     _failStreak         = 0;
     _lastLatencyMs      = null;
     _state              = SystemState.empty;
@@ -243,6 +258,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     try {
       final result       = await _api.getState();
       final wasConnected = _connected;
+      final prevStatus    = _connectivityStatus;
       _connecting        = false;
       _lastLatencyMs     = result.latencyMs;
 
@@ -269,16 +285,22 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       // mid-session and the dashboard kept showing a green "Connected"
       // badge with stale/false states the whole time.
       _connected = serverReachable && _state.plcConnected;
+      _connectivityStatus = _classifyConnectivity(result, serverReachable);
+      _connectivityDebugDetail = result.debugDetail;
 
       if (!wasConnected && _connected) {
         _failStreak = 0;
         _addLog('Connected  (${result.latencyMs}ms)');
       }
-      if (wasConnected && !_connected) {
-        _addLog(
-          serverReachable ? 'PLC unreachable — server is up but hardware is not responding' : 'Connection lost',
-          isError: true,
-        );
+      if (prevStatus != _connectivityStatus) {
+        if (_connectivityStatus != ConnectivityStatus.ok) {
+          final detail = result.debugDetail;
+          _addLog(
+            _connectivityStatus.shortLabel +
+                (detail != null ? ' ($detail)' : ''),
+            isError: true,
+          );
+        }
       }
 
       _failStreak = _connected ? 0 : _failStreak + 1;
@@ -291,6 +313,45 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     } finally {
       _polling = false;
+    }
+  }
+
+  /// Maps one getState() result onto a specific reason, instead of the
+  /// generic "server reachable or not" the UI used to be limited to. Order
+  /// matters: check the more specific backend `code` before falling back
+  /// to a generic bucket keyed only on HTTP status.
+  ConnectivityStatus _classifyConnectivity(
+    ApiResult<Map<String, dynamic>> result, bool serverReachable,
+  ) {
+    if (serverReachable) {
+      return _state.plcConnected ? ConnectivityStatus.ok : ConnectivityStatus.plcDown;
+    }
+    switch (result.errorCode) {
+      case ApiErrorCode.network:
+      case ApiErrorCode.timeout:
+        return ConnectivityStatus.serverUnreachable;
+      case ApiErrorCode.parseError:
+        return ConnectivityStatus.invalidResponse;
+      case ApiErrorCode.serverError:
+        return ConnectivityStatus.serverError;
+      case ApiErrorCode.clientError:
+        switch (result.backendCode) {
+          case 'UNAUTHORIZED':
+            return ConnectivityStatus.authFailure;
+          case 'NO_APARTMENT':
+            return ConnectivityStatus.noApartment;
+          case 'FORBIDDEN':
+            return ConnectivityStatus.forbidden;
+          case 'RATE_LIMITED':
+            return ConnectivityStatus.rateLimited;
+          default:
+            return result.statusCode == 401
+                ? ConnectivityStatus.authFailure
+                : ConnectivityStatus.serverUnreachable;
+        }
+      case ApiErrorCode.unknown:
+      case null:
+        return ConnectivityStatus.serverUnreachable;
     }
   }
 
@@ -543,6 +604,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   // ── Computed helpers ────────────────────────────────────────────────────────
+  //
+  // effectiveXxx() below return a plain bool/int — kept for call sites that
+  // need *some* value regardless (an onChanged handler's current position,
+  // a count of lights on, fade-direction comparisons). They still resolve
+  // through `?? false`/`?? 0`, which is fine for those uses, but must NEVER
+  // be used to decide what a device tile visually renders — that's exactly
+  // the "unknown/unavailable silently became a confident OFF" bug found
+  // live 2026-08-20. For anything the user LOOKS AT, use the xxxState()
+  // methods below instead, which return a DeviceState that can say
+  // "unknown" or "unavailable" instead of lying with a bool.
 
   int effectiveBrightness(int channel) =>
       _pendingBrightness[channel] ?? _state.dali[channel] ?? 0;
@@ -558,6 +629,38 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   bool effectiveToggle(String varName) =>
       _pendingToggle[varName] ?? _state.toggles[varName] ?? false;
+
+  // ── Device state (tri/quad-state, for anything the UI RENDERS) ────────────
+
+  DeviceState relayDeviceState(int channel) => resolveDeviceState(
+        pending: _pendingRelay[channel], raw: _state.relays[channel], systemConnected: _connected,
+      );
+
+  DeviceState toggleDeviceState(String varName) => resolveDeviceState(
+        pending: _pendingToggle[varName], raw: _state.toggles[varName], systemConnected: _connected,
+      );
+
+  DeviceState applianceDeviceState(String gvlName) => resolveDeviceState(
+        pending: _pendingAppliance[gvlName], raw: _state.appliances[gvlName], systemConnected: _connected,
+      );
+
+  BrightnessReading daliDeviceState(int channel) => resolveBrightnessState(
+        pending: _pendingBrightness[channel], raw: _state.dali[channel], systemConnected: _connected,
+      );
+
+  /// Curtains don't have a simple on/off — this only answers "do we have a
+  /// trustworthy reading at all" so the curtain control can show a neutral
+  /// state instead of assuming STOP when the truth is "unknown".
+  DeviceState curtainDeviceState(int index) {
+    if (_pendingCurtain.containsKey(index)) return DeviceState.on;
+    if (!_connected) return DeviceState.unavailable;
+    return _state.curtains[index] == null ? DeviceState.unknown : DeviceState.on;
+  }
+
+  /// Sensors (door/window/motion) are read-only inputs with no pending/
+  /// optimistic value — same resolution, just without a pending map.
+  DeviceState sensorDeviceState(bool? raw) =>
+      resolveDeviceState(pending: null, raw: raw, systemConnected: _connected);
 
   bool get effectiveAlarmArmed =>
       _pendingAlarm ?? _state.security.armed;

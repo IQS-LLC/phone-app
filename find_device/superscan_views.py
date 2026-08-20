@@ -20,7 +20,7 @@ from rest_framework.permissions import IsAdminUser
 
 from .models import Apartment, ScanRun, DiscoveredCapability
 from .permissions import log_action
-from .superscan import start_scan
+from .superscan import start_scan, ScanAlreadyRunning
 
 
 def _ok(**kwargs):
@@ -67,10 +67,18 @@ def start(request, apartment_id):
     if mode not in dict(ScanRun.MODE_CHOICES):
         return _err(f"Invalid mode. Choose one of: {', '.join(dict(ScanRun.MODE_CHOICES))}")
 
+    # Fast-path check for the common case (nice 409 without touching the
+    # DB constraint's error path). Not the actual safety guarantee — see
+    # ScanRun.Meta.constraints for why an .exists() check alone can't
+    # close the race between two concurrent start requests.
     if ScanRun.objects.filter(apartment=apt, status=ScanRun.STATUS_RUNNING).exists():
         return _err("A SuperScan is already running for this apartment.", status=409)
 
-    run = start_scan(apt, mode, request.user)
+    try:
+        run = start_scan(apt, mode, request.user)
+    except ScanAlreadyRunning:
+        return _err("A SuperScan is already running for this apartment.", status=409)
+
     log_action(request, "superscan_start", apartment=apt, mode=mode, scan_run_id=run.pk)
     return _ok(run=_run_dict(run))
 
@@ -137,8 +145,10 @@ def capability_list(request, apartment_id):
         "unknown": sum(1 for c in caps if not c.is_known_type),
         "tested_ok": sum(1 for c in caps if c.test_status == DiscoveredCapability.TEST_PASSED),
         "tested_failed": sum(1 for c in caps if c.test_status == DiscoveredCapability.TEST_FAILED),
+        "unavailable": sum(1 for c in caps if c.test_status == DiscoveredCapability.TEST_UNAVAILABLE),
         "observed_only": sum(1 for c in caps if c.test_status == DiscoveredCapability.TEST_OBSERVED),
         "not_tested": sum(1 for c in caps if c.test_status == DiscoveredCapability.TEST_NOT_TESTED),
+        "stale": sum(1 for c in caps if c.confidence == "low"),
     }
     return _ok(capabilities=[c.to_dict() for c in caps], summary=summary)
 

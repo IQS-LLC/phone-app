@@ -3,9 +3,12 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
+import '../models/connectivity_status.dart';
+import '../models/device_state.dart';
 import '../models/models.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
+import '../utils/room_display.dart';
 import '../widgets/common_widgets.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -159,13 +162,15 @@ class _DashboardScreenState extends State<DashboardScreen>
       builder: (_) => ListenableBuilder(
         listenable: _st,
         builder: (_, _) => _RoomSheet(
-          room:       room,
+          room:       RoomDisplay.label(room),
           color:      _roomColor(room),
           icon:       _roomIcon(room),
           lights:     _lights(room),
           relays:     _relays(room),
           brightness: _brightness,
           relayOn:    _relayOn,
+          daliState:  _st.daliDeviceState,
+          relayState: _st.relayDeviceState,
           bColor:     _brightnessToColor,
           onSetLight: (ch, v) => _st.setDaliBrightness(ch, v, durationMs: _fadeDurationFor(ch, v)),
           onSetRoom:  (pct)   => _st.setRoomBrightness(room, pct),
@@ -312,7 +317,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                         padding: const EdgeInsets.symmetric(horizontal: 20),
                         child: _SwitchGrid(
                           devices:  _st.relayDevices,
-                          relayOn:  _relayOn,
+                          stateOf:  _st.relayDeviceState,
                           onToggle: (ch, v) => _st.setRelay(ch, v),
                         ),
                       ),
@@ -327,7 +332,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                         padding: const EdgeInsets.symmetric(horizontal: 20),
                         child: _VentilatorGrid(
                           devices: _st.toggleDevices,
-                          isOn:    _st.effectiveToggle,
+                          stateOf: _st.toggleDeviceState,
                           onToggle: (varName, v) => _st.setToggle(varName, v),
                         ),
                       ),
@@ -602,17 +607,22 @@ class _HomeInsightsRow extends StatelessWidget {
           ),
           const SizedBox(width: 10),
         ],
-        // Connection card
+        // Connection card — labels the SPECIFIC reason when not healthy
+        // (no apartment / PLC down / session expired / server down), not a
+        // generic "Offline" for every failure mode. See ConnectivityStatus.
         _InsightCard(
-          icon:  appState.connected
-              ? Icons.wifi_rounded
-              : Icons.wifi_off_rounded,
-          color: appState.connected ? C.green : C.red,
-          label: appState.connected ? 'Connected' : 'Offline',
-          sub: appState.connected
+          icon:  _connectivityIcon(appState.connectivityStatus),
+          color: _connectivityColor(appState.connectivityStatus),
+          label: appState.connectivityStatus.shortLabel,
+          sub: appState.connectivityStatus.isHealthy
               ? '${appState.lastLatencyMs ?? '–'}ms'
-              : 'Check settings',
-          active: appState.connected,
+              : (appState.connectivityStatus == ConnectivityStatus.plcDown
+                  ? 'Server OK, hardware down'
+                  : 'Tap for details'),
+          active: appState.connectivityStatus.isHealthy,
+          onTap: appState.connectivityStatus.isHealthy
+              ? null
+              : () => _showConnectivityDetail(context, appState.connectivityStatus),
         ),
         const SizedBox(width: 10),
         // Security stub card
@@ -634,14 +644,21 @@ class _InsightCard extends StatelessWidget {
   final String   label;
   final String   sub;
   final bool     active;
+  final VoidCallback? onTap;
 
   const _InsightCard({
     required this.icon, required this.color,
     required this.label, required this.sub, required this.active,
+    this.onTap,
   });
 
   @override
-  Widget build(BuildContext context) => AnimatedContainer(
+  Widget build(BuildContext context) {
+    final card = _card();
+    return onTap == null ? card : TapScale(onTap: onTap, child: card);
+  }
+
+  Widget _card() => AnimatedContainer(
     duration: Dur.normal,
     width: 162,
     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -681,6 +698,67 @@ class _InsightCard extends StatelessWidget {
         ],
       )),
     ]),
+  );
+}
+
+// ── Connectivity — icon/color mapping + tap-to-explain detail sheet ──────────
+// Kept as free functions (not enum members) since they need theme colors
+// (C.*), which the models layer intentionally doesn't depend on.
+
+IconData _connectivityIcon(ConnectivityStatus s) => switch (s) {
+      ConnectivityStatus.ok => Icons.wifi_rounded,
+      ConnectivityStatus.connecting => Icons.wifi_rounded,
+      ConnectivityStatus.plcDown => Icons.settings_input_antenna_rounded,
+      ConnectivityStatus.noApartment => Icons.apartment_rounded,
+      ConnectivityStatus.authFailure => Icons.lock_clock_rounded,
+      ConnectivityStatus.forbidden => Icons.block_rounded,
+      ConnectivityStatus.rateLimited => Icons.hourglass_bottom_rounded,
+      ConnectivityStatus.serverError => Icons.error_outline_rounded,
+      ConnectivityStatus.invalidResponse => Icons.warning_amber_rounded,
+      ConnectivityStatus.serverUnreachable => Icons.wifi_off_rounded,
+    };
+
+Color _connectivityColor(ConnectivityStatus s) => switch (s) {
+      ConnectivityStatus.ok => C.green,
+      ConnectivityStatus.connecting => C.textTri,
+      ConnectivityStatus.plcDown => C.orange,
+      ConnectivityStatus.noApartment => C.orange,
+      ConnectivityStatus.authFailure => C.orange,
+      ConnectivityStatus.forbidden => C.red,
+      ConnectivityStatus.rateLimited => C.orange,
+      ConnectivityStatus.serverError => C.red,
+      ConnectivityStatus.invalidResponse => C.red,
+      ConnectivityStatus.serverUnreachable => C.red,
+    };
+
+void _showConnectivityDetail(BuildContext context, ConnectivityStatus status) {
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: C.card,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+    builder: (_) => Padding(
+      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Center(child: BottomSheetHandle()),
+        const SizedBox(height: 16),
+        Row(children: [
+          Container(
+            width: 40, height: 40,
+            decoration: BoxDecoration(
+              color: _connectivityColor(status).withAlpha(22), borderRadius: BorderRadius.circular(12)),
+            child: Icon(_connectivityIcon(status), color: _connectivityColor(status), size: 19),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text(status.shortLabel, style: AppText.h3)),
+        ]),
+        const SizedBox(height: 14),
+        Text(status.message, style: AppText.body.copyWith(color: C.textSec)),
+        if (status.action != null) ...[
+          const SizedBox(height: 10),
+          Text(status.action!, style: AppText.bodySm.copyWith(color: C.textTri)),
+        ],
+      ]),
+    ),
   );
 }
 
@@ -829,7 +907,7 @@ class _FeaturedRoomCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text(room,
+                  Text(RoomDisplay.label(room),
                     style: AppText.h2.copyWith(
                       fontSize: 18, letterSpacing: -0.5),
                   ),
@@ -931,7 +1009,7 @@ class _RoomGridCell extends StatelessWidget {
                     color: active ? color : C.textTri, size: 24),
               ),
               const Spacer(),
-              Text(room,
+              Text(RoomDisplay.label(room),
                 style: AppText.bodyMed.copyWith(
                   fontSize: 13, letterSpacing: -0.3, color: C.textPri),
                 maxLines: 2, overflow: TextOverflow.ellipsis,
@@ -1097,13 +1175,52 @@ class _StaffActionButton extends StatelessWidget {
   );
 }
 
+// ── Shared tile visuals for any ON/OFF/UNKNOWN/UNAVAILABLE tile ──────────────
+// One place deciding what each DeviceState looks like, so _SwitchGrid and
+// _VentilatorGrid (and anything added later) can't each invent their own
+// "what does unknown look like" answer — or, worse, skip the question and
+// silently render unknown/unavailable identically to OFF (the exact bug
+// this whole state model exists to make structurally hard to reintroduce).
+
+class _TileVisual {
+  final Color bg, border, iconColor, textColor;
+  final bool interactive;
+  final String? badge;
+  const _TileVisual({
+    required this.bg, required this.border, required this.iconColor,
+    required this.textColor, required this.interactive, this.badge,
+  });
+}
+
+_TileVisual _tileVisual(DeviceState s) => switch (s) {
+      DeviceState.on => _TileVisual(
+          bg: C.green.withAlpha(15), border: C.green.withAlpha(60),
+          iconColor: C.green, textColor: C.textPri, interactive: true),
+      DeviceState.off => _TileVisual(
+          bg: C.card, border: C.border,
+          iconColor: C.textTri, textColor: C.textSec, interactive: true),
+      DeviceState.unknown => _TileVisual(
+          bg: C.orange.withAlpha(10), border: C.orange.withAlpha(45),
+          iconColor: C.orange, textColor: C.textTri, interactive: false, badge: 'UNKNOWN'),
+      DeviceState.unavailable => _TileVisual(
+          bg: C.orange.withAlpha(10), border: C.orange.withAlpha(45),
+          iconColor: C.orange, textColor: C.textTri, interactive: false, badge: 'UNAVAILABLE'),
+    };
+
+IconData _stateIcon(DeviceState s, IconData onIcon, IconData offIcon) => switch (s) {
+      DeviceState.on => onIcon,
+      DeviceState.off => offIcon,
+      DeviceState.unknown => Icons.help_outline_rounded,
+      DeviceState.unavailable => Icons.cloud_off_rounded,
+    };
+
 class _VentilatorGrid extends StatelessWidget {
   final List<ToggleDevice> devices;
-  final bool Function(String) isOn;
+  final DeviceState Function(String) stateOf;
   final void Function(String, bool) onToggle;
 
   const _VentilatorGrid({
-    required this.devices, required this.isOn, required this.onToggle});
+    required this.devices, required this.stateOf, required this.onToggle});
 
   IconData _iconFor(String name) {
     final n = name.toLowerCase();
@@ -1124,14 +1241,15 @@ class _VentilatorGrid extends StatelessWidget {
     ),
     itemBuilder: (_, i) {
       final d  = devices[i];
-      final on = isOn(d.varName);
+      final state = stateOf(d.varName);
+      final on = state.isOn;
+      final v = _tileVisual(state);
       return AnimatedContainer(
         duration: Dur.normal,
         decoration: BoxDecoration(
-          color: on ? C.green.withAlpha(15) : C.card,
+          color: v.bg,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: on ? C.green.withAlpha(60) : C.border, width: 0.5)),
+          border: Border.all(color: v.border, width: 0.5)),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(children: [
@@ -1139,22 +1257,22 @@ class _VentilatorGrid extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(_iconFor(d.name), color: on ? C.green : C.textTri, size: 18),
+                Icon(_stateIcon(state, _iconFor(d.name), _iconFor(d.name)), color: v.iconColor, size: 18),
                 const SizedBox(height: 5),
                 Text(d.name,
                   style: AppText.small.copyWith(
-                    color: on ? C.textPri : C.textSec,
+                    color: on ? C.textPri : v.textColor,
                     fontWeight: on ? FontWeight.w600 : FontWeight.w400,
                     fontSize: 10.5, height: 1.15),
                   maxLines: 2, overflow: TextOverflow.ellipsis),
               ],
             )),
-            if (d.writable)
+            if (d.writable && state.isKnown)
               Switch(
                 value: on,
-                onChanged: (v) {
+                onChanged: (val) {
                   HapticFeedback.selectionClick();
-                  onToggle(d.varName, v);
+                  onToggle(d.varName, val);
                 },
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               )
@@ -1162,11 +1280,11 @@ class _VentilatorGrid extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: (on ? C.green : C.textTri).withAlpha(18),
+                  color: v.iconColor.withAlpha(18),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text(on ? 'ON' : 'OFF', style: AppText.small.copyWith(
-                  color: on ? C.green : C.textTri, fontWeight: FontWeight.w600, fontSize: 10,
+                child: Text(v.badge ?? (on ? 'ON' : 'OFF'), style: AppText.small.copyWith(
+                  color: v.iconColor, fontWeight: FontWeight.w600, fontSize: 9,
                 )),
               ),
           ]),
@@ -1178,11 +1296,11 @@ class _VentilatorGrid extends StatelessWidget {
 
 class _SwitchGrid extends StatelessWidget {
   final List<RelayDevice>        devices;
-  final bool Function(int)       relayOn;
+  final DeviceState Function(int) stateOf;
   final void Function(int, bool) onToggle;
 
   const _SwitchGrid({
-    required this.devices, required this.relayOn, required this.onToggle});
+    required this.devices, required this.stateOf, required this.onToggle});
 
   @override
   Widget build(BuildContext context) => GridView.builder(
@@ -1195,14 +1313,15 @@ class _SwitchGrid extends StatelessWidget {
     ),
     itemBuilder: (_, i) {
       final d  = devices[i];
-      final on = relayOn(d.channel);
+      final state = stateOf(d.channel);
+      final on = state.isOn;
+      final v = _tileVisual(state);
       return AnimatedContainer(
         duration: Dur.normal,
         decoration: BoxDecoration(
-          color: on ? C.green.withAlpha(15) : C.card,
+          color: v.bg,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: on ? C.green.withAlpha(60) : C.border, width: 0.5)),
+          border: Border.all(color: v.border, width: 0.5)),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(children: [
@@ -1211,25 +1330,37 @@ class _SwitchGrid extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Icon(
-                  on ? Icons.lightbulb_rounded : Icons.lightbulb_outline_rounded,
-                  color: on ? C.green : C.textTri, size: 18),
+                  _stateIcon(state, Icons.lightbulb_rounded, Icons.lightbulb_outline_rounded),
+                  color: v.iconColor, size: 18),
                 const SizedBox(height: 5),
                 Text(d.name,
                   style: AppText.small.copyWith(
-                    color: on ? C.textPri : C.textSec,
+                    color: on ? C.textPri : v.textColor,
                     fontWeight: on ? FontWeight.w600 : FontWeight.w400,
                     fontSize: 11),
                   maxLines: 1, overflow: TextOverflow.ellipsis),
               ],
             )),
-            Switch(
-              value: on,
-              onChanged: (v) {
-                HapticFeedback.selectionClick();
-                onToggle(d.channel, v);
-              },
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
+            if (state.isKnown)
+              Switch(
+                value: on,
+                onChanged: (val) {
+                  HapticFeedback.selectionClick();
+                  onToggle(d.channel, val);
+                },
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: v.iconColor.withAlpha(18),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(v.badge!, style: AppText.small.copyWith(
+                  color: v.iconColor, fontWeight: FontWeight.w600, fontSize: 9,
+                )),
+              ),
           ]),
         ),
       );
@@ -1283,6 +1414,8 @@ class _RoomSheet extends StatelessWidget {
   final List<RelayDevice>  relays;
   final int  Function(int)  brightness;
   final bool Function(int)  relayOn;
+  final BrightnessReading Function(int) daliState;
+  final DeviceState Function(int)       relayState;
   final Color Function(int) bColor;
   final void Function(int, int)  onSetLight;
   final void Function(int)       onSetRoom;
@@ -1292,6 +1425,7 @@ class _RoomSheet extends StatelessWidget {
     required this.room,   required this.color,  required this.icon,
     required this.lights, required this.relays,
     required this.brightness, required this.relayOn, required this.bColor,
+    required this.daliState, required this.relayState,
     required this.onSetLight, required this.onSetRoom, required this.onSetRelay,
   });
 
@@ -1398,11 +1532,13 @@ class _RoomSheet extends StatelessWidget {
                   Wrap(
                     spacing: 10, runSpacing: 10,
                     children: lights.map((d) {
+                      final reading = daliState(d.channel);
+                      final known = reading.state.isKnown;
                       final pct  = brightness(d.channel);
-                      final clr  = bColor(pct);
-                      final isOn = pct > 0;
+                      final clr  = known ? bColor(pct) : C.orange;
+                      final isOn = reading.state.isOn;
                       return TapScale(
-                        onTap: () {
+                        onTap: !known ? null : () {
                           HapticFeedback.selectionClick();
                           onSetLight(d.channel, isOn ? 0 : 100);
                         },
@@ -1410,10 +1546,10 @@ class _RoomSheet extends StatelessWidget {
                           duration: Dur.fast,
                           width: 64, height: 64,
                           decoration: BoxDecoration(
-                            color: isOn ? clr.withAlpha(22) : C.card2,
+                            color: isOn ? clr.withAlpha(22) : (known ? C.card2 : C.orange.withAlpha(10)),
                             borderRadius: BorderRadius.circular(16),
                             border: Border.all(
-                              color: isOn ? clr.withAlpha(80) : C.border,
+                              color: isOn ? clr.withAlpha(80) : (known ? C.border : C.orange.withAlpha(45)),
                               width: 0.5),
                             boxShadow: isOn
                                 ? [BoxShadow(color: clr.withAlpha(60),
@@ -1424,15 +1560,15 @@ class _RoomSheet extends StatelessWidget {
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Icon(
-                                isOn
-                                    ? Icons.lightbulb_rounded
-                                    : Icons.lightbulb_outline_rounded,
-                                color: isOn ? clr : C.textTri, size: 22),
-                              if (isOn) ...[
+                                !known
+                                    ? _stateIcon(reading.state, Icons.lightbulb_rounded, Icons.lightbulb_outline_rounded)
+                                    : (isOn ? Icons.lightbulb_rounded : Icons.lightbulb_outline_rounded),
+                                color: isOn ? clr : (known ? C.textTri : C.orange), size: 22),
+                              if (isOn || !known) ...[
                                 const SizedBox(height: 2),
-                                Text('$pct%',
+                                Text(known ? '$pct%' : reading.state.label,
                                   style: AppText.small.copyWith(
-                                    color: clr, fontSize: 9,
+                                    color: known ? clr : C.orange, fontSize: 9,
                                     fontWeight: FontWeight.w700)),
                               ],
                             ],
@@ -1447,9 +1583,11 @@ class _RoomSheet extends StatelessWidget {
 
                   // Individual sliders
                   ...lights.map((d) {
+                    final reading = daliState(d.channel);
+                    final known = reading.state.isKnown;
                     final pct  = brightness(d.channel);
-                    final clr  = bColor(pct);
-                    final isOn = pct > 0;
+                    final clr  = known ? bColor(pct) : C.orange;
+                    final isOn = reading.state.isOn;
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 20),
                       child: Column(
@@ -1461,7 +1599,7 @@ class _RoomSheet extends StatelessWidget {
                               width: 8, height: 8,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: isOn ? clr : C.border,
+                                color: isOn ? clr : (known ? C.border : C.orange),
                                 boxShadow: isOn
                                     ? [BoxShadow(
                                         color: clr.withAlpha(130),
@@ -1477,9 +1615,9 @@ class _RoomSheet extends StatelessWidget {
                                     ? FontWeight.w600
                                     : FontWeight.w400),
                             )),
-                            Text('$pct%',
+                            Text(known ? '$pct%' : reading.state.label,
                               style: AppText.small.copyWith(
-                                color: isOn ? clr : C.textTri,
+                                color: isOn ? clr : (known ? C.textTri : C.orange),
                                 fontWeight: FontWeight.w700,
                                 fontFeatures: [
                                   const FontFeature.tabularFigures()],
@@ -1493,11 +1631,18 @@ class _RoomSheet extends StatelessWidget {
                               inactiveTrackColor: C.border2,
                               overlayColor:       clr.withAlpha(20),
                               trackHeight:        5,
+                              disabledActiveTrackColor: C.orange.withAlpha(60),
+                              disabledThumbColor: C.orange.withAlpha(120),
+                              disabledInactiveTrackColor: C.border2,
                             ),
+                            // Disabled (null onChanged) whenever we don't have
+                            // a trustworthy reading — dragging a slider that's
+                            // showing a stale/unknown value would silently
+                            // "confirm" a level that was never actually read.
                             child: Slider(
-                              value:     pct.toDouble(),
+                              value:     pct.toDouble().clamp(0, 100),
                               min:       0, max: 100, divisions: 20,
-                              onChanged: (v) =>
+                              onChanged: !known ? null : (v) =>
                                   onSetLight(d.channel, v.round()),
                             ),
                           ),
@@ -1515,9 +1660,11 @@ class _RoomSheet extends StatelessWidget {
                   Wrap(
                     spacing: 10, runSpacing: 10,
                     children: relays.map((d) {
-                      final on = relayOn(d.channel);
+                      final state = relayState(d.channel);
+                      final known = state.isKnown;
+                      final on = state.isOn;
                       return TapScale(
-                        onTap: () {
+                        onTap: !known ? null : () {
                           HapticFeedback.selectionClick();
                           onSetRelay(d.channel, !on);
                         },
@@ -1526,12 +1673,12 @@ class _RoomSheet extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 10),
                           decoration: BoxDecoration(
-                            color: on ? C.green.withAlpha(20) : C.card,
+                            color: on ? C.green.withAlpha(20) : (known ? C.card : C.orange.withAlpha(10)),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
                               color: on
                                   ? C.green.withAlpha(80)
-                                  : C.border,
+                                  : (known ? C.border : C.orange.withAlpha(45)),
                               width: 0.5),
                           ),
                           child: Row(mainAxisSize: MainAxisSize.min,
@@ -1540,11 +1687,11 @@ class _RoomSheet extends StatelessWidget {
                                 width: 6, height: 6,
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  color: on ? C.green : C.textTri)),
+                                  color: on ? C.green : (known ? C.textTri : C.orange))),
                               const SizedBox(width: 8),
-                              Text(d.name,
+                              Text(known ? d.name : '${d.name} · ${state.label}',
                                 style: AppText.small.copyWith(
-                                  color: on ? C.textPri : C.textSec,
+                                  color: on ? C.textPri : (known ? C.textSec : C.orange),
                                   fontWeight: on
                                       ? FontWeight.w600
                                       : FontWeight.w400)),

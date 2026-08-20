@@ -1,3 +1,5 @@
+import '../utils/room_display.dart';
+
 /// A device eligible to be a trigger (switch/motion/door/window sensor) or
 /// an action (DALI/relay/curtain/appliance) in an AutomationRule.
 class AutomationDevice {
@@ -23,7 +25,7 @@ class AutomationDevice {
         roomName:       j['room_name'] as String?,
       );
 
-  String get label => roomName != null ? '$name ($roomName)' : name;
+  String get label => roomName != null ? '$name (${RoomDisplay.label(roomName!)})' : name;
 }
 
 /// "When [triggerDevice] becomes [triggerState], set [actionDevice] to

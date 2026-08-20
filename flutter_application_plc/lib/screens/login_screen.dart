@@ -62,6 +62,21 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
+  Future<void> _openServerAddressSheet(BuildContext context) async {
+    final currentUrl = await AppConfig.resolve();
+    if (!context.mounted) return;
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: C.card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (_) => _ServerAddressSheet(currentUrl: currentUrl),
+    );
+    if (saved == true && mounted) {
+      AppToast.show(context, 'Server address saved. Try signing in again.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -179,7 +194,30 @@ class _LoginScreenState extends State<LoginScreen>
                       textAlign: TextAlign.center,
                     ),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 20),
+                  // Deliberately NOT a bare text field on the login form
+                  // itself — see config.dart's docstring on why that's a
+                  // credential-phishing vector. This is a separate,
+                  // low-prominence, explicitly-labeled technical action
+                  // that requires the Cloudflare quick-tunnel-rotation
+                  // recovery gap found live 2026-08-20 (a stale compiled-in
+                  // URL otherwise locks out every user, Tech Team included,
+                  // until a full rebuild) without weakening that guarantee
+                  // for the resident who never taps it.
+                  Center(
+                    child: TextButton(
+                      onPressed: () => _openServerAddressSheet(context),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.textTri,
+                        minimumSize: const Size(0, 0),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text('Advanced (Tech Team)',
+                          style: AppText.caption.copyWith(color: C.textTri, fontSize: 11)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                 ],
               ),
             ),
@@ -302,6 +340,96 @@ class _LoginForm extends StatelessWidget {
         validator: (v) => (v == null || v.isEmpty) ? 'Enter your password' : null,
       ),
     ]),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server address recovery sheet — Tech Team only, reached via the
+// low-prominence "Advanced" link above, never a field on the login form
+// itself. See config.dart's docstring and the comment at that link for why.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ServerAddressSheet extends StatefulWidget {
+  final String currentUrl;
+  const _ServerAddressSheet({required this.currentUrl});
+
+  @override
+  State<_ServerAddressSheet> createState() => _ServerAddressSheetState();
+}
+
+class _ServerAddressSheetState extends State<_ServerAddressSheet> {
+  late final TextEditingController _ctrl = TextEditingController(text: widget.currentUrl);
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final url = _ctrl.text.trim();
+    if (url.isEmpty) return;
+    setState(() => _saving = true);
+    await AppConfig.persist(url);
+    if (mounted) Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.only(
+      left: 20, right: 20, top: 20,
+      bottom: MediaQuery.viewInsetsOf(context).bottom + 28,
+    ),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Center(child: BottomSheetHandle()),
+        const SizedBox(height: 16),
+        Row(children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(color: C.orange.withAlpha(22), borderRadius: BorderRadius.circular(11)),
+            child: const Icon(Icons.dns_rounded, color: C.orange, size: 17),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text('Server Address', style: AppText.h2.copyWith(fontSize: 18))),
+        ]),
+        const SizedBox(height: 14),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(color: C.orange.withAlpha(14), borderRadius: BorderRadius.circular(12)),
+          child: Text(
+            'Only change this if instructed by your building\'s technical team. '
+            'This determines where your sign-in details are sent — this device only, '
+            'and only until you sign in successfully.',
+            style: AppText.bodySm.copyWith(color: C.textSec),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Text('SERVER URL', style: AppText.label),
+        const SizedBox(height: 6),
+        TextField(
+          controller: _ctrl,
+          autocorrect: false,
+          keyboardType: TextInputType.url,
+          style: AppText.mono.copyWith(fontSize: 13, color: C.textPri),
+          decoration: InputDecoration(
+            hintText: 'https://your-server.example.com',
+            hintStyle: AppText.mono.copyWith(color: C.textTri, fontSize: 13),
+            filled: true, fillColor: C.elevated,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: C.border)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: C.border)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: C.accent, width: 1.5)),
+          ),
+        ),
+        const SizedBox(height: 18),
+        PrimaryButton(label: 'Save & Retry Sign In', loading: _saving, onTap: _save),
+        const SizedBox(height: 8),
+      ],
+    ),
   );
 }
 

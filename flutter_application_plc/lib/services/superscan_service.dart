@@ -37,8 +37,12 @@ class SuperscanService {
       return {'ok': false, 'error': 'No connection to server'};
     } on TimeoutException {
       return {'ok': false, 'error': 'Request timed out'};
-    } catch (e) {
-      return {'ok': false, 'error': e.toString()};
+    } catch (_) {
+      // Never surface raw exception text (host-lookup/TLS/ClientException
+      // strings) in a resident/tech-facing error message — see
+      // api_service.dart's _exceptionToResult for the live incident this
+      // pattern was found from.
+      return {'ok': false, 'error': "Can't reach the server. Check your connection."};
     }
   }
 
@@ -58,8 +62,12 @@ class SuperscanService {
       return {'ok': false, 'error': 'No connection to server'};
     } on TimeoutException {
       return {'ok': false, 'error': 'Request timed out'};
-    } catch (e) {
-      return {'ok': false, 'error': e.toString()};
+    } catch (_) {
+      // Never surface raw exception text (host-lookup/TLS/ClientException
+      // strings) in a resident/tech-facing error message — see
+      // api_service.dart's _exceptionToResult for the live incident this
+      // pattern was found from.
+      return {'ok': false, 'error': "Can't reach the server. Check your connection."};
     }
   }
 

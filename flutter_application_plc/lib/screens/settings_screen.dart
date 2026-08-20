@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
 import '../config.dart';
+import '../models/connectivity_status.dart';
 import '../state/app_state.dart';
 import '../auth/auth_state.dart';
 import '../widgets/common_widgets.dart';
@@ -762,8 +763,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
             _InfoRow(
               icon: Icons.wifi_rounded, label: 'Connection',
-              value: s.connected ? 'Online' : 'Offline',
-              valueColor: s.connected ? C.green : C.red, badge: true,
+              value: s.connectivityStatus.isHealthy ? 'Online' : s.connectivityStatus.shortLabel,
+              valueColor: s.connectivityStatus.isHealthy
+                  ? C.green
+                  : (s.connectivityStatus == ConnectivityStatus.plcDown ? C.orange : C.red),
+              badge: true,
             ),
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(

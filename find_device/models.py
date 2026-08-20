@@ -963,6 +963,22 @@ class ScanRun(models.Model):
 
     class Meta:
         ordering = ["-started_at"]
+        constraints = [
+            # DB-level guarantee, not just the view's pre-check .exists() —
+            # a partial unique index is the only thing that actually closes
+            # the race between two concurrent "start scan" requests (an
+            # .exists() check has nothing to lock against when the matching
+            # set is empty, so two requests can both see "no running scan"
+            # and both proceed). Postgres allows only one row per apartment
+            # with status='running' at a time; a second INSERT racing past
+            # the view's pre-check fails with IntegrityError instead of
+            # silently starting a second concurrent scan against the PLC.
+            models.UniqueConstraint(
+                fields=["apartment"],
+                condition=models.Q(status="running"),
+                name="one_running_scan_per_apartment",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"ScanRun({self.apartment.name}, {self.mode}, {self.status})"
@@ -982,11 +998,19 @@ class DiscoveredCapability(models.Model):
     TEST_OBSERVED    = "observed"       # DISCOVERED — NOT ACTIVELY TESTED
     TEST_PASSED      = "tested_ok"
     TEST_FAILED      = "tested_failed"
+    # Distinct from TEST_FAILED: the active test never actually reached the
+    # device — the PLC itself was unreachable at the moment of the attempt.
+    # Without this, a mid-scan PLC drop (see project history: this has
+    # happened live, more than once) marks every untested-so-far writable
+    # device "tested — failed", which reads to a technician as "this light
+    # is broken" when the truth is "we never got to ask it."
+    TEST_UNAVAILABLE = "unavailable"
     TEST_CHOICES = [
         (TEST_NOT_TESTED, "Not tested"),
         (TEST_OBSERVED,   "Discovered — not actively tested"),
         (TEST_PASSED,     "Tested — passed"),
         (TEST_FAILED,     "Tested — failed"),
+        (TEST_UNAVAILABLE, "Unavailable — PLC disconnected during test"),
     ]
 
     apartment        = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="discovered_capabilities")
