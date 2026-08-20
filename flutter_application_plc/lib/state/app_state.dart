@@ -245,19 +245,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       final wasConnected = _connected;
       _connecting        = false;
       _lastLatencyMs     = result.latencyMs;
-      _connected         = result.success;
 
-      if (!wasConnected && _connected) {
-        _failStreak = 0;
-        _addLog('Connected  (${result.latencyMs}ms)');
-      }
-      if (wasConnected && !_connected) {
-        _addLog('Connection lost', isError: true);
-      }
-
-      _failStreak = _connected ? 0 : _failStreak + 1;
-
-      if (result.success && result.data != null) {
+      final serverReachable = result.success && result.data != null;
+      if (serverReachable) {
         _state = SystemState.fromJson(result.data!);
 
         // Clear optimistic updates that the server has confirmed
@@ -270,7 +260,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
       }
 
-      if (_connected && !_initializedDevices) await _loadDevices();
+      // "Connected" must mean the PLC itself is reachable, not just that the
+      // HTTP round trip to Django succeeded — a healthy server can still
+      // return plc_connected:false (every device value null) while this
+      // app happily reported "Connected" and silently rendered every null
+      // device state as OFF (?? false), which is actively misleading during
+      // a real outage. Found live 2026-08-20 during QA: the PLC dropped
+      // mid-session and the dashboard kept showing a green "Connected"
+      // badge with stale/false states the whole time.
+      _connected = serverReachable && _state.plcConnected;
+
+      if (!wasConnected && _connected) {
+        _failStreak = 0;
+        _addLog('Connected  (${result.latencyMs}ms)');
+      }
+      if (wasConnected && !_connected) {
+        _addLog(
+          serverReachable ? 'PLC unreachable — server is up but hardware is not responding' : 'Connection lost',
+          isError: true,
+        );
+      }
+
+      _failStreak = _connected ? 0 : _failStreak + 1;
+
+      // Device list/config comes from the DB, not live PLC data — load it
+      // as soon as the server itself is reachable so the room/device grid
+      // still renders during a PLC outage instead of staying empty.
+      if (serverReachable && !_initializedDevices) await _loadDevices();
 
       notifyListeners();
     } finally {

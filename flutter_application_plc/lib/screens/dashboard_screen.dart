@@ -1145,8 +1145,8 @@ class _VentilatorGrid extends StatelessWidget {
                   style: AppText.small.copyWith(
                     color: on ? C.textPri : C.textSec,
                     fontWeight: on ? FontWeight.w600 : FontWeight.w400,
-                    fontSize: 11),
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                    fontSize: 10.5, height: 1.15),
+                  maxLines: 2, overflow: TextOverflow.ellipsis),
               ],
             )),
             if (d.writable)

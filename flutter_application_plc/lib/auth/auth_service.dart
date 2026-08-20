@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -241,8 +242,17 @@ class AuthService {
       );
     } on TimeoutException {
       return AuthResult.err('Connection timed out', code: 'TIMEOUT');
-    } on Exception catch (e) {
-      return AuthResult.err(e.toString(), code: 'NETWORK');
+    } on SocketException {
+      return AuthResult.err('Can\'t reach the server. Check your connection.', code: 'NETWORK');
+    } on FormatException {
+      return AuthResult.err('Unexpected response from the server.', code: 'PARSE_ERROR');
+    } on Exception {
+      // Never surface raw exception text (ClientException/host-lookup
+      // details, stack-trace-shaped strings) to the login screen — found
+      // live 2026-08-20: a stale tunnel hostname produced a multi-line
+      // "ClientException with SocketException: Failed host lookup:
+      // ...errno = 7..." string rendered verbatim in the error banner.
+      return AuthResult.err('Can\'t reach the server. Check your connection.', code: 'NETWORK');
     }
   }
 
