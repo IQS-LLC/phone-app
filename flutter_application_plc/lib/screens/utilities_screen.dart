@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/device_state.dart';
 import '../models/models.dart';
 import '../services/api_service.dart';
@@ -49,19 +50,36 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
   void initState() {
     super.initState();
     _init();
+    // This screen's ApiService is built once with whatever URL was current
+    // at open time. Without this, changing the server (Settings, or the
+    // login-screen recovery sheet if this screen were somehow still mounted
+    // underneath) would leave it silently polling the old address for as
+    // long as this screen stays alive — the same class of bug AppState was
+    // hardened against, just narrower in blast radius. See RuntimeConfig's
+    // doc comment.
+    RuntimeConfig.instance.addListener(_onConfigChanged);
   }
 
   @override
   void dispose() {
+    RuntimeConfig.instance.removeListener(_onConfigChanged);
     _pollTimer?.cancel();
     super.dispose();
   }
 
+  void _onConfigChanged() {
+    final svc = widget.authState.service;
+    _api = ApiService(
+      RuntimeConfig.instance.serverUrl,
+      tokenProvider: () => svc.getAccessToken(),
+      tokenRefresher: () => svc.refreshAccessToken(),
+    );
+  }
+
   Future<void> _init() async {
     final svc = widget.authState.service;
-    final baseUrl = await svc.getBaseUrl() ?? '';
     _api = ApiService(
-      baseUrl,
+      RuntimeConfig.instance.serverUrl,
       tokenProvider: () => svc.getAccessToken(),
       tokenRefresher: () => svc.refreshAccessToken(),
     );

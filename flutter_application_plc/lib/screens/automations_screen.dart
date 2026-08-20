@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/automation_models.dart';
 import '../services/automation_service.dart';
 import '../theme.dart';
@@ -39,13 +40,32 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
   void initState() {
     super.initState();
     _initSvc();
+    RuntimeConfig.instance.addListener(_onConfigChanged);
+  }
+
+  @override
+  void dispose() {
+    RuntimeConfig.instance.removeListener(_onConfigChanged);
+    super.dispose();
+  }
+
+  // Rebuilds _svc if the server URL changes while this screen is open —
+  // without this it would keep silently talking to the old server for as
+  // long as the screen stays mounted. Same class of bug AppState was
+  // hardened against; see RuntimeConfig's doc comment.
+  void _onConfigChanged() {
+    final svc = widget.authState.service;
+    _svc = AutomationService(
+      RuntimeConfig.instance.serverUrl,
+      tokenProvider:  () => svc.getAccessToken(),
+      tokenRefresher: () => svc.refreshAccessToken(),
+    );
   }
 
   Future<void> _initSvc() async {
-    final svc     = widget.authState.service;
-    final baseUrl = await svc.getBaseUrl() ?? '';
+    final svc = widget.authState.service;
     _svc = AutomationService(
-      baseUrl,
+      RuntimeConfig.instance.serverUrl,
       tokenProvider:  () => svc.getAccessToken(),
       tokenRefresher: () => svc.refreshAccessToken(),
     );

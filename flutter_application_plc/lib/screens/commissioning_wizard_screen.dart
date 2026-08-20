@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/commissioning_models.dart';
 import '../services/commissioning_service.dart';
 import '../theme.dart';
@@ -79,13 +80,26 @@ class _CommissioningWizardScreenState extends State<CommissioningWizardScreen>
     super.initState();
     _pageCtrl = PageController();
     _initSvc();
+    RuntimeConfig.instance.addListener(_onConfigChanged);
+  }
+
+  // Rebuilds _svc if the server URL changes while this screen is open —
+  // without this it would keep silently talking to the old server for as
+  // long as the wizard stays mounted. Same class of bug AppState was
+  // hardened against; see RuntimeConfig's doc comment.
+  void _onConfigChanged() {
+    final svc = widget.authState.service;
+    _svc = CommissioningService(
+      RuntimeConfig.instance.serverUrl,
+      tokenProvider:  () => svc.getAccessToken(),
+      tokenRefresher: () => svc.refreshAccessToken(),
+    );
   }
 
   Future<void> _initSvc() async {
-    final svc     = widget.authState.service;
-    final baseUrl = await svc.getBaseUrl() ?? '';
+    final svc = widget.authState.service;
     _svc = CommissioningService(
-      baseUrl,
+      RuntimeConfig.instance.serverUrl,
       tokenProvider:  () => svc.getAccessToken(),
       tokenRefresher: () => svc.refreshAccessToken(),
     );
@@ -94,6 +108,7 @@ class _CommissioningWizardScreenState extends State<CommissioningWizardScreen>
 
   @override
   void dispose() {
+    RuntimeConfig.instance.removeListener(_onConfigChanged);
     _pageCtrl.dispose();
     super.dispose();
   }

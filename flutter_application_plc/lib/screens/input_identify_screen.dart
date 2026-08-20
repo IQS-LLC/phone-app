@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/relabel_models.dart';
 import '../services/light_relabel_service.dart';
 import '../theme.dart';
@@ -61,19 +62,33 @@ class _InputIdentifyScreenState extends State<InputIdentifyScreen> {
   void initState() {
     super.initState();
     _initSvc();
+    RuntimeConfig.instance.addListener(_onConfigChanged);
   }
 
   @override
   void dispose() {
+    RuntimeConfig.instance.removeListener(_onConfigChanged);
     _pollTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> _initSvc() async {
-    final svc     = widget.authState.service;
-    final baseUrl = await svc.getBaseUrl() ?? '';
+  // Rebuilds _svc if the server URL changes while this screen is open —
+  // without this it would keep silently talking to the old server for as
+  // long as the screen stays mounted. Same class of bug AppState was
+  // hardened against; see RuntimeConfig's doc comment.
+  void _onConfigChanged() {
+    final svc = widget.authState.service;
     _svc = LightRelabelService(
-      baseUrl,
+      RuntimeConfig.instance.serverUrl,
+      tokenProvider:  () => svc.getAccessToken(),
+      tokenRefresher: () => svc.refreshAccessToken(),
+    );
+  }
+
+  Future<void> _initSvc() async {
+    final svc = widget.authState.service;
+    _svc = LightRelabelService(
+      RuntimeConfig.instance.serverUrl,
       tokenProvider:  () => svc.getAccessToken(),
       tokenRefresher: () => svc.refreshAccessToken(),
     );
