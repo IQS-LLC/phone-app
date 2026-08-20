@@ -14,8 +14,8 @@ from django.test import TestCase
 from django.utils import timezone
 
 from find_device.models import (
-    Apartment, ApartmentDevice, ApartmentMembership, PLCDevice, Role, Room,
-    TemporaryAccess,
+    Apartment, ApartmentDevice, ApartmentMembership, AutomationRule,
+    BuildingMembership, PLCDevice, Role, Room, TemporaryAccess,
 )
 from find_device.plc.devices import CurtainMotor
 from find_device.plc.registry import DeviceRegistry
@@ -1488,3 +1488,752 @@ class PlcHeartbeatTests(TestCase):
         self.device.save(update_fields=["down_since"])
         notify = self._run_with_status(up=False)
         notify.delay.assert_not_called()
+
+
+# =============================================================================
+# Light Relabel API
+# =============================================================================
+
+class RelabelPermissionTests(TestCase):
+    """
+    IT Team (is_staff) only — deliberately not Owner (homeowner), not
+    Installer, not even a Building Owner. Re-identifying/relabeling DALI
+    channels is IT Team's own tooling, kept invisible to everyone else,
+    including roles that otherwise hold broad access elsewhere.
+    """
+
+    def setUp(self):
+        self.apartment = Apartment.objects.get(name="Apartment 16")
+        self.staff = User.objects.create_user(username="relabel_staff", password="pw12345", is_staff=True)
+        self.owner = User.objects.create_user(username="relabel_owner", password="pw12345")
+        self.installer = User.objects.create_user(username="relabel_installer", password="pw12345")
+        self.resident = User.objects.create_user(username="relabel_resident", password="pw12345")
+        self.building_owner = User.objects.create_user(username="relabel_bldg_owner", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=self.owner, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_OWNER, is_default=True,
+        )
+        ApartmentMembership.objects.create(
+            user=self.installer, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_INSTALLER, is_default=True,
+        )
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+        BuildingMembership.objects.create(user=self.building_owner, building=self.apartment.building)
+
+    def _token(self, username):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": "pw12345"},
+        ).json()["access"]
+
+    def test_resident_forbidden(self):
+        token = self._token("relabel_resident")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_allowed(self):
+        token = self._token("relabel_staff")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+    def test_owner_forbidden(self):
+        """Homeowner is deliberately resident-equivalent for anything technical."""
+        token = self._token("relabel_owner")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_installer_forbidden(self):
+        token = self._token("relabel_installer")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_building_owner_forbidden(self):
+        """
+        Building Owner has IT-Team-equivalent user/apartment management but
+        never this — the one tool that would reveal there's no bespoke PLC
+        coding happening stays exclusively IT Team's.
+        """
+        token = self._token("relabel_bldg_owner")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_unauthenticated_rejected(self):
+        resp = self.client.get(f"/relabel/{self.apartment.pk}/outputs/dali/")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_inputs_also_staff_only(self):
+        token = self._token("relabel_owner")
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/inputs/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+class RelabelOutputChannelListTests(TestCase):
+    """GET /relabel/<apt>/outputs/<type>/ shape for each output type."""
+
+    def setUp(self):
+        self.apartment = Apartment.objects.get(name="Apartment 16")
+        self.staff = User.objects.create_user(username="relabel_list_staff", password="pw12345", is_staff=True)
+
+    def _token(self):
+        return self.client.post(
+            "/auth/login/", {"username": "relabel_list_staff", "password": "pw12345"},
+        ).json()["access"]
+
+    def test_dali_returns_30_channels_and_existing_rooms(self):
+        token = self._token()
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/dali/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["channels"]), 30)  # 1-31 excluding 29
+        self.assertNotIn(29, [c["channel"] for c in body["channels"]])
+        self.assertGreater(len(body["rooms"]), 0)
+
+        already_assigned = [c for c in body["channels"] if c["assigned"]]
+        self.assertGreater(len(already_assigned), 0)
+        sample = already_assigned[0]
+        self.assertIsNotNone(sample["name"])
+        self.assertIsNotNone(sample["room_name"])
+
+    def test_relay_returns_16_channels(self):
+        token = self._token()
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/relay/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["channels"]), 16)
+
+    def test_curtain_returns_2_channels(self):
+        token = self._token()
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/curtain/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["channels"]), 2)
+
+    def test_unknown_output_type_rejected(self):
+        token = self._token()
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/outputs/hvac/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+
+class RelabelOutputFlashAndAssignTests(TestCase):
+    """
+    Flash-test and assign use a dedicated apartment (not "Apartment 16") so
+    the hot-reloaded in-memory registry entries this creates don't leak into
+    Apartment 16's shared, process-lifetime DeviceRegistry instance and
+    corrupt its device-count assertions elsewhere (DeviceRegistryDbDrivenTests).
+    """
+
+    def setUp(self):
+        self.apartment = Apartment.objects.create(name="Relabel Test Apartment")
+        self.staff = User.objects.create_user(username="relabel_fa_staff", password="pw12345", is_staff=True)
+
+    def _token(self):
+        return self.client.post(
+            "/auth/login/", {"username": "relabel_fa_staff", "password": "pw12345"},
+        ).json()["access"]
+
+    def test_flash_unassigned_dali_channel_succeeds(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/20/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.json()["ok"])
+        self.assertEqual(resp.json()["channel"], 20)
+
+    def test_flash_invalid_dali_channel_rejected(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/29/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_flash_unassigned_relay_channel_succeeds(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/relay/3/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["channel"], 3)
+
+    def test_flash_invalid_relay_channel_rejected(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/relay/17/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_flash_unassigned_curtain_succeeds(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/curtain/1/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["channel"], 1)
+
+    def test_flash_invalid_curtain_rejected(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/curtain/3/flash/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_assign_creates_new_room_and_device(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/21/assign/",
+            {"name": "Laundry Ceiling Light", "room_name": "Laundry Room"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["room_name"], "Laundry Room")
+
+        device = ApartmentDevice.objects.get(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI, channel_or_index=21,
+        )
+        self.assertEqual(device.name, "Laundry Ceiling Light")
+        self.assertEqual(device.room.name, "Laundry Room")
+
+    def test_assign_relay_creates_relay_typed_device(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/relay/2/assign/",
+            {"name": "Porch Wall Light", "room_name": "Porch"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        device = ApartmentDevice.objects.get(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_RELAY, channel_or_index=2,
+        )
+        self.assertEqual(device.name, "Porch Wall Light")
+
+    def test_assign_curtain_creates_curtain_typed_device(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/curtain/2/assign/",
+            {"name": "Bedroom Curtain", "room_name": "Bedroom Main"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        device = ApartmentDevice.objects.get(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_CURTAIN, channel_or_index=2,
+        )
+        self.assertEqual(device.name, "Bedroom Curtain")
+
+    def test_assign_relabels_existing_channel_in_place(self):
+        token = self._token()
+        room_a = Room.objects.create(apartment=self.apartment, name="Bedroom Light 1 (wrong)")
+        ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=22, name="Bedroom Light 1", room=room_a,
+        )
+
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/22/assign/",
+            {"name": "Guest Bathroom Light", "room_name": "Guest Bathroom"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Same device row updated in place — no duplicate created for ch22.
+        matches = ApartmentDevice.objects.filter(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI, channel_or_index=22,
+        )
+        self.assertEqual(matches.count(), 1)
+        device = matches.first()
+        self.assertEqual(device.name, "Guest Bathroom Light")
+        self.assertEqual(device.room.name, "Guest Bathroom")
+
+    def test_assign_reuses_existing_room_by_id_supports_numbered_duplicates(self):
+        token = self._token()
+        bathroom_1 = Room.objects.create(apartment=self.apartment, name="Bathroom 1")
+        Room.objects.create(apartment=self.apartment, name="Bathroom 2")
+
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/23/assign/",
+            {"name": "Bathroom 1 Ceiling Light", "room_id": bathroom_1.pk},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            Room.objects.filter(apartment=self.apartment, name__startswith="Bathroom").count(), 2,
+        )
+        device = ApartmentDevice.objects.get(apartment=self.apartment, channel_or_index=23)
+        self.assertEqual(device.room_id, bathroom_1.pk)
+
+    def test_assign_missing_name_rejected(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/24/assign/",
+            {"room_name": "Office"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_resident_cannot_assign(self):
+        resident = User.objects.create_user(username="relabel_fa_resident", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+        token = self.client.post(
+            "/auth/login/", {"username": "relabel_fa_resident", "password": "pw12345"},
+        ).json()["access"]
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/outputs/dali/25/assign/",
+            {"name": "Hacked", "room_name": "Nowhere"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+class RelabelInputTests(TestCase):
+    """
+    GET /relabel/<apt>/inputs/ (live state for every switch/sensor channel,
+    assigned or not) and POST .../inputs/assign/ — same dedicated-apartment
+    isolation rationale as RelabelOutputFlashAndAssignTests.
+    """
+
+    def setUp(self):
+        self.apartment = Apartment.objects.create(name="Relabel Input Test Apartment")
+        self.staff = User.objects.create_user(username="relabel_in_staff", password="pw12345", is_staff=True)
+
+    def _token(self):
+        return self.client.post(
+            "/auth/login/", {"username": "relabel_in_staff", "password": "pw12345"},
+        ).json()["access"]
+
+    def test_lists_all_input_groups_with_live_state(self):
+        token = self._token()
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/inputs/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["switches"]), 48)
+        self.assertEqual(len(body["motion_sensors"]), 8)
+        self.assertEqual(len(body["door_sensors"]), 16)
+        self.assertEqual(len(body["window_sensors"]), 16)
+        # PLC_MOCK=true in tests → read_batch is skipped, every raw state is False.
+        self.assertFalse(any(s["state"] for s in body["switches"]))
+        self.assertIn("rooms", body)
+
+    def test_assign_switch_creates_device(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/inputs/assign/",
+            {"device_type": "switch", "index": 34, "name": "Laundry Motion Switch", "room_name": "Laundry Room"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        device = ApartmentDevice.objects.get(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_SWITCH, channel_or_index=34,
+        )
+        self.assertEqual(device.name, "Laundry Motion Switch")
+        self.assertEqual(device.room.name, "Laundry Room")
+
+    def test_assign_motion_sensor_creates_device(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/inputs/assign/",
+            {"device_type": "motion_sensor", "index": 5, "name": "Hallway PIR", "room_name": "Hallway"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        device = ApartmentDevice.objects.get(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_MOTION_SENSOR, channel_or_index=5,
+        )
+        self.assertEqual(device.name, "Hallway PIR")
+
+    def test_assign_unknown_device_type_rejected(self):
+        token = self._token()
+        resp = self.client.post(
+            f"/relabel/{self.apartment.pk}/inputs/assign/",
+            {"device_type": "thermostat", "index": 1, "name": "X", "room_name": "Y"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_resident_cannot_list_inputs(self):
+        resident = User.objects.create_user(username="relabel_in_resident", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+        token = self.client.post(
+            "/auth/login/", {"username": "relabel_in_resident", "password": "pw12345"},
+        ).json()["access"]
+        resp = self.client.get(
+            f"/relabel/{self.apartment.pk}/inputs/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
+# =============================================================================
+# Building Owner scoping — user_management_views.py opened up beyond is_staff
+# =============================================================================
+
+class BuildingOwnerScopingTests(TestCase):
+    """
+    Building Owner gets IT-Team-equivalent user/apartment management, but
+    strictly scoped to their own building — never another building's data,
+    and never apartment_plc (PLC connection settings stays is_staff-only).
+    """
+
+    def setUp(self):
+        self.building_a_apt = Apartment.objects.create(name="BOA Apt 1", building="Building A")
+        self.building_b_apt = Apartment.objects.create(name="BOB Apt 1", building="Building B")
+
+        self.bo_a = User.objects.create_user(username="bo_a", password="pw12345")
+        BuildingMembership.objects.create(user=self.bo_a, building="Building A")
+
+        self.resident_a = User.objects.create_user(username="bo_resident_a", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=self.resident_a, apartment=self.building_a_apt,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+        self.resident_b = User.objects.create_user(username="bo_resident_b", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=self.resident_b, apartment=self.building_b_apt,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+
+    def _token(self, username):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": "pw12345"},
+        ).json()["access"]
+
+    def test_building_owner_sees_only_their_buildings_apartments(self):
+        token = self._token("bo_a")
+        resp = self.client.get("/manage/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 200)
+        names = [a["name"] for a in resp.json()["apartments"]]
+        self.assertIn("BOA Apt 1", names)
+        self.assertNotIn("BOB Apt 1", names)
+
+    def test_building_owner_cannot_view_other_buildings_apartment_detail(self):
+        token = self._token("bo_a")
+        resp = self.client.get(
+            f"/manage/apartments/{self.building_b_apt.pk}/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_building_owner_sees_only_their_buildings_users(self):
+        token = self._token("bo_a")
+        resp = self.client.get("/manage/users/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 200)
+        usernames = [u["username"] for u in resp.json()["users"]]
+        self.assertIn("bo_resident_a", usernames)
+        self.assertNotIn("bo_resident_b", usernames)
+
+    def test_building_owner_cannot_view_other_buildings_user_detail(self):
+        token = self._token("bo_a")
+        resp = self.client.get(
+            f"/manage/users/{self.resident_b.pk}/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_building_owner_cannot_assign_user_into_other_building(self):
+        token = self._token("bo_a")
+        resp = self.client.post(
+            f"/manage/users/{self.resident_b.pk}/assign-apartment/",
+            {"apartment_id": self.building_b_apt.pk, "role": "resident"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_building_owner_can_rename_room_in_their_building(self):
+        token = self._token("bo_a")
+        create_resp = self.client.post(
+            f"/manage/apartments/{self.building_a_apt.pk}/rooms/", {"name": "Office"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(create_resp.status_code, 201)
+
+    def test_building_owner_cannot_touch_rooms_in_other_building(self):
+        token = self._token("bo_a")
+        resp = self.client.post(
+            f"/manage/apartments/{self.building_b_apt.pk}/rooms/", {"name": "Office"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_building_owner_cannot_reach_plc_settings(self):
+        """apartment_plc stays is_staff-only — PLC connection config is the
+        one thing Building Owner never gets, same bar as the relabel tool."""
+        token = self._token("bo_a")
+        resp = self.client.get(
+            f"/manage/apartments/{self.building_a_apt.pk}/plc/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_building_owner_new_apartment_forced_into_their_building(self):
+        token = self._token("bo_a")
+        resp = self.client.post(
+            "/manage/apartments/", {"name": "BOA Apt 2"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["apartment"]["building"], "Building A")
+
+    def test_building_owner_cannot_create_apartment_in_other_building(self):
+        token = self._token("bo_a")
+        resp = self.client.post(
+            "/manage/apartments/", {"name": "Sneaky Apt", "building": "Building B"},
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_plain_resident_still_forbidden_from_user_management(self):
+        token = self._token("bo_resident_a")
+        resp = self.client.get("/manage/users/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_still_sees_every_building(self):
+        staff = User.objects.create_user(username="bo_staff", password="pw12345", is_staff=True)
+        token = self._token("bo_staff")
+        resp = self.client.get("/manage/apartments/", HTTP_AUTHORIZATION=f"Bearer {token}")
+        names = [a["name"] for a in resp.json()["apartments"]]
+        self.assertIn("BOA Apt 1", names)
+        self.assertIn("BOB Apt 1", names)
+
+
+# =============================================================================
+# Automations — "no more hand-written PLC code" from the phone
+# =============================================================================
+
+class AutomationApiTests(TestCase):
+    """
+    CRUD + validation for AutomationRule. is_staff only — same bar as
+    relabel. Uses a dedicated apartment (not "Apartment 16") for the same
+    shared-registry-isolation reason as RelabelOutputFlashAndAssignTests.
+    """
+
+    def setUp(self):
+        self.apartment = Apartment.objects.create(name="Automation Test Apartment")
+        self.staff = User.objects.create_user(username="auto_staff", password="pw12345", is_staff=True)
+        self.owner = User.objects.create_user(username="auto_owner", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=self.owner, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_OWNER, is_default=True,
+        )
+        self.switch = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_SWITCH,
+            channel_or_index=1, name="Test Switch",
+        )
+        self.light = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=1, name="Test Light",
+        )
+        self.relay = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_RELAY,
+            channel_or_index=1, name="Test Relay",
+        )
+
+    def _token(self, username):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": "pw12345"},
+        ).json()["access"]
+
+    def test_owner_forbidden(self):
+        token = self._token("auto_owner")
+        resp = self.client.get(
+            f"/automations/{self.apartment.pk}/rules/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_staff_can_list_rules_and_eligible_devices(self):
+        token = self._token("auto_staff")
+        resp = self.client.get(
+            f"/automations/{self.apartment.pk}/rules/", HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["rules"], [])
+        trigger_ids = [d["id"] for d in body["triggers"]]
+        action_ids = [d["id"] for d in body["actions"]]
+        self.assertIn(self.switch.pk, trigger_ids)
+        self.assertIn(self.light.pk, action_ids)
+        self.assertNotIn(self.light.pk, trigger_ids)   # a light isn't a valid trigger
+        self.assertNotIn(self.switch.pk, action_ids)   # a switch isn't a valid action
+
+    def test_staff_can_create_dali_rule(self):
+        token = self._token("auto_staff")
+        resp = self.client.post(
+            f"/automations/{self.apartment.pk}/rules/",
+            {
+                "name": "Switch turns on light",
+                "trigger_device_id": self.switch.pk, "trigger_state": "true",
+                "action_device_id": self.light.pk, "action_value": "80",
+            },
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200)
+        rule = resp.json()["rule"]
+        self.assertTrue(rule["enabled"])
+        self.assertEqual(rule["action_value"], "80")
+        self.assertTrue(AutomationRule.objects.filter(pk=rule["id"]).exists())
+
+    def test_invalid_dali_action_value_rejected(self):
+        token = self._token("auto_staff")
+        resp = self.client.post(
+            f"/automations/{self.apartment.pk}/rules/",
+            {
+                "name": "Bad rule",
+                "trigger_device_id": self.switch.pk, "trigger_state": "true",
+                "action_device_id": self.light.pk, "action_value": "150",
+            },
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_relay_action_value_rejected(self):
+        token = self._token("auto_staff")
+        resp = self.client.post(
+            f"/automations/{self.apartment.pk}/rules/",
+            {
+                "name": "Bad relay rule",
+                "trigger_device_id": self.switch.pk, "trigger_state": "true",
+                "action_device_id": self.relay.pk, "action_value": "on",
+            },
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_light_cannot_be_used_as_trigger(self):
+        token = self._token("auto_staff")
+        resp = self.client.post(
+            f"/automations/{self.apartment.pk}/rules/",
+            {
+                "name": "Bad trigger",
+                "trigger_device_id": self.light.pk, "trigger_state": "true",
+                "action_device_id": self.relay.pk, "action_value": "true",
+            },
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_update_and_delete_rule(self):
+        token = self._token("auto_staff")
+        rule = AutomationRule.objects.create(
+            apartment=self.apartment, name="Original", enabled=True,
+            trigger_device=self.switch, trigger_state=True,
+            action_device=self.relay, action_value="true",
+        )
+
+        patch_resp = self.client.patch(
+            f"/automations/{self.apartment.pk}/rules/{rule.pk}/",
+            {"enabled": "false"}, content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(patch_resp.status_code, 200)
+        rule.refresh_from_db()
+        self.assertFalse(rule.enabled)
+
+        del_resp = self.client.delete(
+            f"/automations/{self.apartment.pk}/rules/{rule.pk}/",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertFalse(AutomationRule.objects.filter(pk=rule.pk).exists())
+
+
+class AutomationExecutionTests(TestCase):
+    """
+    Exercises DeviceRegistry._execute_automation() directly — under
+    PLC_MOCK, NotificationManager.subscribe() always returns False (no real
+    ADS connection to push notifications over), so this validates the
+    action-execution logic itself rather than the notification wiring,
+    the same way flash_raw_dali's tests validate the write path without a
+    live PLC.
+    """
+
+    def setUp(self):
+        self.apartment = Apartment.objects.create(name="Automation Exec Test Apartment")
+        self.switch = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_SWITCH,
+            channel_or_index=10, name="Exec Switch",
+        )
+        self.light = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=10, name="Exec Light",
+        )
+        self.relay = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_RELAY,
+            channel_or_index=10, name="Exec Relay",
+        )
+
+    def test_dali_action_sets_brightness(self):
+        rule = AutomationRule.objects.create(
+            apartment=self.apartment, name="Dim rule", enabled=True,
+            trigger_device=self.switch, trigger_state=True,
+            action_device=self.light, action_value="55",
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        registry._start()
+        registry.add_dali(channel=10, name="Exec Light", room="", apartment_device_id=self.light.pk)
+        registry._execute_automation(rule.pk)
+        self.assertEqual(registry.dali(10).read_actual_level(), 55)
+
+    def test_relay_action_sets_state(self):
+        rule = AutomationRule.objects.create(
+            apartment=self.apartment, name="Relay on rule", enabled=True,
+            trigger_device=self.switch, trigger_state=True,
+            action_device=self.relay, action_value="true",
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        registry._start()
+        registry.add_relay(channel=10, name="Exec Relay", room="")
+        registry._execute_automation(rule.pk)
+        self.assertTrue(registry.relay(10).read_state())
+
+    def test_disabled_rule_does_not_execute(self):
+        rule = AutomationRule.objects.create(
+            apartment=self.apartment, name="Disabled rule", enabled=False,
+            trigger_device=self.switch, trigger_state=True,
+            action_device=self.relay, action_value="true",
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        registry._start()
+        registry.add_relay(channel=10, name="Exec Relay", room="")
+        registry._execute_automation(rule.pk)
+        self.assertFalse(registry.relay(10).read_state())
+
+    def test_reload_and_remove_automation_do_not_crash_under_mock(self):
+        rule = AutomationRule.objects.create(
+            apartment=self.apartment, name="Reload rule", enabled=True,
+            trigger_device=self.switch, trigger_state=True,
+            action_device=self.relay, action_value="true",
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        registry._start()
+        registry.add_switch(index=10, name="Exec Switch", room="")
+        registry.add_relay(channel=10, name="Exec Relay", room="")
+        registry.reload_automation(rule.pk)   # subscribe() returns False under mock — should not raise
+        registry.remove_automation(rule.pk)   # no-op since nothing was actually subscribed — should not raise

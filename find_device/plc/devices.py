@@ -142,6 +142,35 @@ class DaliChannel:
         time.sleep(0.05)
         self._client.write(self._var_set_level, False, pyads.PLCTYPE_BOOL)
 
+    def fade_to(self, target_percent: int, duration_ms: int, should_continue):
+        """
+        Step from the current actual level to target_percent over
+        duration_ms, checking should_continue() before every step so a
+        newer fade request (e.g. the user drags the slider again) can
+        cancel this one instead of the two fighting over the channel.
+
+        Step count is capped, not scaled linearly with duration — this
+        runs against a PLC (Windows CE, 2026-08 sessions on this project
+        spent hours proving its ADS layer is fragile under load) so a
+        slow 4s fade must spread the SAME handful of writes further apart,
+        not send more of them. Each set_brightness() call already costs
+        ~50ms+ from its own commit-pulse protocol, so duration_ms is a
+        target, not a hard guarantee — real timing has protocol overhead
+        on top, most noticeable at the fast end.
+        """
+        start = self.read_actual_level()
+        if start == target_percent:
+            return
+        steps = max(2, min(16, duration_ms // 100))
+        interval = duration_ms / steps / 1000.0
+        for i in range(1, steps + 1):
+            if not should_continue():
+                return
+            level = round(start + (target_percent - start) * (i / steps))
+            self.set_brightness(level)
+            if i < steps:
+                time.sleep(interval)
+
     def turn_on(self):
         """Level-based on: no bOn pin is wired, so "on" is just a nonzero level."""
         self.set_brightness(self._DEFAULT_ON_PERCENT)
@@ -225,6 +254,74 @@ class WallRelay:
                 'device_type': 'wall_relay'}
 
 
+# ── NamedRelay ────────────────────────────────────────────────────────────────
+
+class NamedRelay:
+    """
+    Plain named BOOL relay/light living directly under gvlDALI — the 8
+    fixtures added straight to POU_Controller.TcPOU without ever getting a
+    gvlController bridge variable (big-area light, laundry/bathroom/master
+    bathroom/guest bathroom ventilators, balcony light, mirror light, both
+    Var Lights). Each is a single global BOOL, already linked to a real
+    KL2809 output channel, toggled in the PLC only by a local push-button
+    rising edge — there is no separate Cmd/commit pair like WallRelay or
+    DaliChannel use.
+
+    Because nothing in POU_Controller re-writes these every scan (unlike
+    the laundry ventilator, see writable=False below), an ADS write here
+    just sticks until the next physical button press flips it — so a
+    direct write is a safe, correct remote toggle with no PLC change
+    needed.
+
+    writable=False is for gvlDALI.bventiliatorRelay specifically: POU_
+    Controller sets `gvlDALI.bventiliatorRelay := gvlDALI.bSensor1;`
+    unconditionally every 10ms scan, so any ADS write would be clobbered
+    within one cycle. Modeled as read-only status until the PLC gets a
+    manual-override branch (same pattern already sitting unused in
+    POU_Controller for the old Guest Bathroom relay).
+    """
+
+    def __init__(self, var_name: str, name: str, room: str, client, writable: bool = True):
+        self.var_name = var_name
+        self.name     = name
+        self.room     = room
+        self.writable = writable
+        self._client  = client
+        self._mock_state = False
+
+    @property
+    def _var(self) -> str: return f'gvlDALI.{self.var_name}'
+
+    # Public alias + decoder — see DaliChannel.batch_var.
+    @property
+    def batch_var(self) -> str: return self._var
+    batch_plctype = pyads.PLCTYPE_BOOL
+
+    @staticmethod
+    def decode_batch(raw: Any) -> bool:
+        return bool(raw)
+
+    def set_state(self, on: bool):
+        if not self.writable:
+            raise ValueError(
+                f"{self.var_name} is sensor-driven in the PLC (overwritten every "
+                f"scan) — not remotely controllable until the PLC adds a manual "
+                f"override branch.")
+        if self._client.mock:
+            self._mock_state = on
+            return
+        self._client.write(self._var, on, pyads.PLCTYPE_BOOL)
+
+    def read_state(self) -> bool:
+        if self._client.mock:
+            return self._mock_state
+        return bool(self._client.read(self._var, pyads.PLCTYPE_BOOL))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {'var_name': self.var_name, 'name': self.name, 'room': self.room,
+                'writable': self.writable, 'device_type': 'toggle'}
+
+
 # ── SwitchInput ───────────────────────────────────────────────────────────────
 
 class SwitchInput:
@@ -248,6 +345,12 @@ class SwitchInput:
     @property
     def _var(self) -> str: return f'gvlDALI.bSwitchOn{self.index}'
 
+    # Public alias for AutomationRule/NotificationManager subscription —
+    # see DaliChannel.batch_var for the same pattern.
+    @property
+    def notification_var(self) -> str: return self._var
+    notification_plctype = pyads.PLCTYPE_BOOL
+
     def read_state(self) -> bool:
         if self._client.mock:
             return self._mock_state
@@ -256,6 +359,45 @@ class SwitchInput:
     def to_dict(self) -> Dict[str, Any]:
         return {'index': self.index, 'name': self.name, 'room': self.room,
                 'device_type': 'switch_input'}
+
+
+# ── NamedSwitchInput ──────────────────────────────────────────────────────────
+
+class NamedSwitchInput:
+    """
+    Read-only input counterpart to NamedRelay — a physical push-button wired
+    directly into POU_Controller under its own unique name (e.g.
+    "bVentilatorGuestButton", "bBalconLight") rather than a numbered slot in
+    the bSwitchOn1..48 array SwitchInput expects. These are the buttons that
+    drive the 8 writable NamedRelay fixtures (ventilators, balcony/var
+    lights) found in the 2026-08-18 TwinCAT scan.
+
+    Exists purely so these buttons can show up as Automation triggers and
+    be identified/renamed — there is no write side, same as SwitchInput.
+    """
+
+    def __init__(self, var_name: str, name: str, room: str, client):
+        self.var_name = var_name
+        self.name     = name
+        self.room     = room
+        self._client  = client
+        self._mock_state = False
+
+    @property
+    def _var(self) -> str: return f'gvlDALI.{self.var_name}'
+
+    @property
+    def notification_var(self) -> str: return self._var
+    notification_plctype = pyads.PLCTYPE_BOOL
+
+    def read_state(self) -> bool:
+        if self._client.mock:
+            return self._mock_state
+        return bool(self._client.read(self._var, pyads.PLCTYPE_BOOL))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {'var_name': self.var_name, 'name': self.name, 'room': self.room,
+                'device_type': 'named_switch'}
 
 
 # ── CurtainMotor ──────────────────────────────────────────────────────────────
@@ -402,6 +544,10 @@ class MagneticSensor:
         prefix = 'Door' if self.sensor_type == 'door' else 'Window'
         return f'gvlIO.aPy{prefix}Sensor[{self.index}]'
 
+    @property
+    def notification_var(self) -> str: return self._var
+    notification_plctype = pyads.PLCTYPE_BOOL
+
     def read_state(self) -> bool:
         """Returns True if the door/window is open."""
         if self._client.mock:
@@ -435,6 +581,10 @@ class MotionSensor:
 
     @property
     def _var(self) -> str: return f'gvlDALI.bSensor{self.index - 1}'
+
+    @property
+    def notification_var(self) -> str: return self._var
+    notification_plctype = pyads.PLCTYPE_BOOL
 
     def read_state(self) -> bool:
         if self._client.mock:

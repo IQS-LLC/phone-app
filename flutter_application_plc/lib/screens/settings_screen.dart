@@ -9,6 +9,11 @@ import 'connection_screen.dart';
 import 'dynamic_dashboard_screen.dart';
 import 'user_management_screen.dart';
 import 'apartment_management_screen.dart';
+import 'light_reconfigure_screen.dart';
+import 'input_identify_screen.dart';
+import 'automations_screen.dart';
+import 'utilities_screen.dart';
+import 'superscan_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final AppState    appState;
@@ -23,15 +28,24 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _loggingOut  = false;
   bool _savingPush  = false;
+  bool _savingVentilatorsHome = false;
   bool _savingUrl   = false;
   bool _testingConn = false;
   bool _renaming    = false;
   late final TextEditingController _urlCtrl;
 
+  // Live-drag values, separate from the persisted authState.user values —
+  // the slider needs to move smoothly on every pixel of drag without
+  // firing a PATCH per pixel; onChangeEnd is what actually saves.
+  late double _dimMs;
+  late double _undimMs;
+
   @override
   void initState() {
     super.initState();
     _urlCtrl = TextEditingController(text: widget.appState.baseUrl);
+    _dimMs   = (widget.authState?.user?.dimDurationMs   ?? 800).toDouble();
+    _undimMs = (widget.authState?.user?.undimDurationMs ?? 500).toDouble();
   }
 
   @override
@@ -46,6 +60,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final ok = await widget.authState!.updatePushNotifications(v);
     if (!mounted) return;
     setState(() => _savingPush = false);
+    if (!ok) AppToast.show(context, 'Could not update preference', error: true);
+  }
+
+  Future<void> _toggleVentilatorsHome(bool v) async {
+    if (widget.authState == null) return;
+    setState(() => _savingVentilatorsHome = true);
+    final ok = await widget.authState!.updateShowVentilatorsHome(v);
+    if (!mounted) return;
+    setState(() => _savingVentilatorsHome = false);
     if (!ok) AppToast.show(context, 'Could not update preference', error: true);
   }
 
@@ -145,6 +168,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // ── Preferences ──────────────────────────────────────────────────
           if (widget.authState != null)
             _sectionPad(_preferencesSection()),
+          // ── Lighting (dim/undim fade speed) ─────────────────────────────
+          if (widget.authState != null)
+            _sectionPad(_lightingSection()),
+          // ── Utilities (ventilators, balcony/mirror lights, etc.) ───────────
+          if (widget.authState?.apartmentId != null)
+            _sectionPad(_utilitiesSection()),
           // ── Device Management (installer / Tech Team) ─────────────────
           if (widget.authState?.hasInstallerAccess ?? false)
             _sectionPad(_deviceManagementSection()),
@@ -395,11 +424,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _preferencesSection() {
     final pushEnabled = widget.authState?.user?.pushNotifications ?? true;
+    final ventilatorsOnHome = widget.authState?.user?.showVentilatorsHome ?? true;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       SectionHeader('Preferences'),
       const SizedBox(height: 12),
       AppCard(
-        child: Padding(
+        child: Column(children: [
+        Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           child: Row(children: [
             Container(
@@ -418,9 +449,131 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Switch(value: pushEnabled, activeThumbColor: C.accent, onChanged: _togglePush),
           ]),
         ),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: C.accent.withAlpha(18), borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.air_rounded, color: C.accent, size: 16),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text('Ventilators & Extra Lights on Home', style: AppText.bodyMed)),
+            if (_savingVentilatorsHome)
+              const SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: C.accent))
+            else
+              Switch(value: ventilatorsOnHome, activeThumbColor: C.accent, onChanged: _toggleVentilatorsHome),
+          ]),
+        ),
+        ]),
       ),
     ]);
   }
+
+  // ── Lighting ──────────────────────────────────────────────────────────────
+
+  String _fadeLabel(double ms) {
+    if (ms < 1000) return '${ms.round()}ms';
+    return '${(ms / 1000).toStringAsFixed(1)}s';
+  }
+
+  Future<void> _commitDim(double ms) async {
+    final ok = await widget.authState?.updateFadeDurations(dimMs: ms.round()) ?? false;
+    if (!ok && mounted) AppToast.show(context, 'Could not save dim speed', error: true);
+  }
+  Future<void> _commitUndim(double ms) async {
+    final ok = await widget.authState?.updateFadeDurations(undimMs: ms.round()) ?? false;
+    if (!ok && mounted) AppToast.show(context, 'Could not save undim speed', error: true);
+  }
+
+  Widget _lightingSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('Lighting'),
+    const SizedBox(height: 4),
+    Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Text(
+        'How quickly lights fade when you dim them down vs. bring them back up. '
+        'Separate from the app\'s own UI animations — this is the actual light transition.',
+        style: AppText.bodySm.copyWith(color: C.textTri),
+      ),
+    ),
+    const SizedBox(height: 12),
+    AppCard(
+      child: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: C.blue.withAlpha(18), borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.trending_down_rounded, color: C.blue, size: 16),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text('Dim Speed', style: AppText.bodyMed)),
+            Text(_fadeLabel(_dimMs), style: AppText.bodySm.copyWith(color: C.textSec)),
+          ]),
+        ),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(activeTrackColor: C.blue, thumbColor: C.blue),
+          child: Slider(
+            value: _dimMs, min: 100, max: 5000, divisions: 49,
+            onChanged: (v) => setState(() => _dimMs = v),
+            onChangeEnd: _commitDim,
+          ),
+        ),
+        const Divider(height: 0.5, thickness: 0.5, color: C.border),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: Row(children: [
+            Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                color: C.orange.withAlpha(18), borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.trending_up_rounded, color: C.orange, size: 16),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text('Undim Speed', style: AppText.bodyMed)),
+            Text(_fadeLabel(_undimMs), style: AppText.bodySm.copyWith(color: C.textSec)),
+          ]),
+        ),
+        SliderTheme(
+          data: SliderTheme.of(context).copyWith(activeTrackColor: C.orange, thumbColor: C.orange),
+          child: Slider(
+            value: _undimMs, min: 100, max: 5000, divisions: 49,
+            onChanged: (v) => setState(() => _undimMs = v),
+            onChangeEnd: _commitUndim,
+          ),
+        ),
+      ]),
+    ),
+  ]);
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+
+  Widget _utilitiesSection() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    SectionHeader('Utilities'),
+    const SizedBox(height: 12),
+    AppCard(
+      child: _SettingsNavRow(
+        icon: Icons.tune_rounded, iconColor: C.accent,
+        label: 'Ventilators & Extra Lights',
+        sub: 'Balcony, mirror, and bathroom ventilators',
+        onTap: () => Navigator.push(context, MaterialPageRoute(
+          builder: (_) => UtilitiesScreen(
+            authState: widget.authState!,
+            apartmentId: widget.authState!.apartmentId!,
+          ),
+        )),
+      ),
+    ),
+  ]);
 
   // ── Device Management ────────────────────────────────────────────────────
 
@@ -515,6 +668,63 @@ class _SettingsScreenState extends State<SettingsScreen> {
           label: 'Map Editor', sub: 'Create and edit floor-plan zones for any apartment',
           onTap: widget.onOpenMapEditor ?? () {},
         ),
+        // Reconfigure Lights / Identify Inputs — IT Team only, deliberately
+        // not shown to Owner/Installer/Building Owner (see
+        // has_relabel_access server-side).
+        if (widget.authState?.apartmentId != null) ...[
+          const Divider(height: 0.5, thickness: 0.5, color: C.border),
+          _SettingsNavRow(
+            icon: Icons.lightbulb_outline_rounded, iconColor: C.orange,
+            label: 'Reconfigure Devices',
+            sub: 'Flash each DALI/relay/curtain channel and fix its room + name',
+            onTap: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => LightReconfigureScreen(
+                authState: widget.authState!,
+                apartmentId: widget.authState!.apartmentId!,
+                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+              ),
+            )),
+          ),
+          const Divider(height: 0.5, thickness: 0.5, color: C.border),
+          _SettingsNavRow(
+            icon: Icons.sensors_rounded, iconColor: C.orange,
+            label: 'Identify Switches & Sensors',
+            sub: 'Watch live input state and assign switches/motion/door/window sensors',
+            onTap: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => InputIdentifyScreen(
+                authState: widget.authState!,
+                apartmentId: widget.authState!.apartmentId!,
+                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+              ),
+            )),
+          ),
+          const Divider(height: 0.5, thickness: 0.5, color: C.border),
+          _SettingsNavRow(
+            icon: Icons.bolt_rounded, iconColor: C.orange,
+            label: 'Automations',
+            sub: 'When this switch/sensor does X, do Y — no PLC code required',
+            onTap: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => AutomationsScreen(
+                authState: widget.authState!,
+                apartmentId: widget.authState!.apartmentId!,
+                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+              ),
+            )),
+          ),
+          const Divider(height: 0.5, thickness: 0.5, color: C.border),
+          _SettingsNavRow(
+            icon: Icons.travel_explore_rounded, iconColor: C.purple,
+            label: '🔍 SUPERSCAN',
+            sub: 'Discover every device, sensor, and capability — safely test what\'s writable',
+            onTap: () => Navigator.push(context, MaterialPageRoute(
+              builder: (_) => SuperscanScreen(
+                authState: widget.authState!,
+                apartmentId: widget.authState!.apartmentId!,
+                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+              ),
+            )),
+          ),
+        ],
       ]),
     ),
   ]);

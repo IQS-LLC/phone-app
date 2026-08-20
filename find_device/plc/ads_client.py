@@ -67,7 +67,15 @@ class ADSClient:
 
     # ── Reconnect parameters ──────────────────────────────────────────────────
     _reconnect_delay     = 1.0    # initial back-off interval (seconds)
-    _reconnect_max_delay = 60.0   # cap on back-off interval
+    # Capped at 20s (was 60s) — this CX has been intermittently healthy for
+    # only brief windows (a few minutes at a time, confirmed 2026-08-18).
+    # A plain reconnect attempt here is just open()+read_state(), no route
+    # modification, so tightening this cap is safe: it only means noticing
+    # a brief healthy window sooner, not hammering the target harder. Route
+    # repair (which DOES touch the target's route table and is genuinely
+    # disruptive if repeated) has its own separate, much longer cooldown
+    # below — unaffected by this value.
+    _reconnect_max_delay = 20.0
 
     # ── Auto route-repair ─────────────────────────────────────────────────────
     # TwinCAT engineering sessions (project rebuild/reactivate/redownload)

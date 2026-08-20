@@ -1,21 +1,20 @@
 """
-Lugh Tech Team — User Management API.
+Lugh Tech Team / Building Owner — User & Apartment Management API.
 
-Endpoints (all under /manage/users/, staff-only — IsAdminUser)
-─────────────────────────────────────────────────────────────────────────
-  GET    /manage/users/                 List every account + apartment/session summary
-  GET    /manage/users/<id>/            One account's full detail
-  POST   /manage/users/<id>/disable/    Deactivate (blocks login, doesn't delete)
-  POST   /manage/users/<id>/enable/     Reactivate
-  POST   /manage/users/<id>/reset-password/   Set a new password
-  POST   /manage/users/<id>/force-logout/     Revoke every active session
-  POST   /manage/users/<id>/assign-apartment/ Create/update an ApartmentMembership
-  DELETE /manage/users/<id>/                  Permanently delete the account
+Endpoints (all under /manage/users/, /manage/apartments/) are open to
+is_staff (IT Team, every apartment/user) AND to a Building Owner (see
+BuildingMembership), scoped to their own building only — see
+IsStaffOrBuildingOwner + apartments_in_scope()/users_in_scope() in
+permissions.py. This is organizational access (rename rooms/devices,
+manage residents) — it deliberately does NOT include apartment_plc
+(PLC connection settings), which stays is_staff-only: that's the one
+piece of "technical/PLC" territory Building Owner never gets, same as
+the light-relabel tool in relabel_views.py.
 
-This is "Tech Team" tooling — residents never reach these endpoints; the
-Flutter UI hides the whole section for them, and the backend independently
-enforces IsAdminUser regardless of what the client sends, per "never trust
-the Flutter app."
+A plain Resident or Homeowner never reaches any of this — the Flutter UI
+hides the whole section for them, and the backend independently enforces
+the permission check regardless of what the client sends, per "never
+trust the Flutter app."
 """
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ from .models import (
     Apartment, ApartmentDevice, ApartmentMembership, PLCDevice, Permission,
     Role, Room, SessionInfo,
 )
-from .permissions import log_action
+from .permissions import IsStaffOrBuildingOwner, apartments_in_scope, log_action, users_in_scope
 
 logger = logging.getLogger("lumina.usermgmt")
 
@@ -80,21 +79,22 @@ def _user_summary(user: User) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_list(request: Request) -> Response:
-    users = User.objects.all().order_by("username")
+    users = users_in_scope(request.user).order_by("username")
     return _ok({"users": [_user_summary(u) for u in users]})
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_list_all(request: Request) -> Response:
     """
-    Every apartment in the system, for the Tech Team's assign-apartment
+    Every apartment this caller may administer, for the assign-apartment
     picker — distinct from /auth/apartments/, which only returns the
-    CALLER's own apartments.
+    CALLER's own apartments. Building Owner sees only their building's
+    apartments, so they can't assign someone into a building they don't own.
     """
-    apartments = Apartment.objects.all().order_by("name")
+    apartments = apartments_in_scope(request.user).order_by("name")
     return _ok({"apartments": [
         {"id": a.pk, "name": a.name, "building": a.building, "floor": a.floor}
         for a in apartments
@@ -102,9 +102,9 @@ def apartment_list_all(request: Request) -> Response:
 
 
 @api_view(["GET", "DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_detail(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
 
     if request.method == "DELETE":
         if user.pk == request.user.pk:
@@ -122,9 +122,9 @@ def user_detail(request: Request, pk: int) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_disable(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
     if user.pk == request.user.pk:
         return _err("You can't disable your own account.", "INVALID_PARAM", 400)
     user.is_active = False
@@ -135,9 +135,9 @@ def user_disable(request: Request, pk: int) -> Response:
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_enable(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
     user.is_active = True
     user.save(update_fields=["is_active"])
     log_action(request, "user_enabled", target_user_id=pk)
@@ -149,9 +149,9 @@ def user_enable(request: Request, pk: int) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_reset_password(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
     new_password = request.data.get("new_password") or ""
     if not new_password:
         return _err("new_password is required", "INVALID_PARAM", 400)
@@ -185,9 +185,9 @@ def _force_logout(user: User) -> int:
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_force_logout(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
     count = _force_logout(user)
     log_action(request, "force_logout", target_user_id=pk, count=count)
     return _ok({"message": f"Revoked {count} session(s) for {user.username}"})
@@ -198,18 +198,24 @@ def user_force_logout(request: Request, pk: int) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_assign_apartment(request: Request, pk: int) -> Response:
     """
     Body: apartment_id (required), role ('owner'|'resident'|'installer',
     default 'resident'), custom_role_id (optional, overrides role),
     is_default (optional bool).
+
+    The target user is intentionally NOT restricted to users_in_scope() —
+    that would make it impossible to bring a brand-new resident into an
+    apartment (they have no membership yet, so they're not "in scope" until
+    this call creates one). The apartment itself IS restricted: a Building
+    Owner can only assign people into their own building's apartments.
     """
     user = get_object_or_404(User, pk=pk)
     apartment_id = request.data.get("apartment_id")
     if not apartment_id:
         return _err("apartment_id is required", "INVALID_PARAM", 400)
-    apartment = get_object_or_404(Apartment, pk=apartment_id)
+    apartment = get_object_or_404(apartments_in_scope(request.user), pk=apartment_id)
 
     role = request.data.get("role", ApartmentMembership.ROLE_RESIDENT)
     if role not in dict(ApartmentMembership.ROLE_CHOICES):
@@ -236,9 +242,10 @@ def user_assign_apartment(request: Request, pk: int) -> Response:
 
 
 @api_view(["DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_remove_apartment(request: Request, pk: int, apartment_id: int) -> Response:
     user = get_object_or_404(User, pk=pk)
+    get_object_or_404(apartments_in_scope(request.user), pk=apartment_id)  # 404s if out of scope
     deleted, _ = ApartmentMembership.objects.filter(user=user, apartment_id=apartment_id).delete()
     if not deleted:
         return _err("No such membership", "NOT_FOUND", 404)
@@ -251,9 +258,9 @@ def user_remove_apartment(request: Request, pk: int, apartment_id: int) -> Respo
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_sessions(request: Request, pk: int) -> Response:
-    user = get_object_or_404(User, pk=pk)
+    user = get_object_or_404(users_in_scope(request.user), pk=pk)
     sessions = SessionInfo.objects.filter(user=user, revoked=False)
     return _ok({"sessions": [
         {
@@ -275,14 +282,14 @@ def user_sessions(request: Request, pk: int) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def permission_list(request: Request) -> Response:
     perms = Permission.objects.all()
     return _ok({"permissions": [{"code": p.code, "label": p.label} for p in perms]})
 
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def user_apartment_permissions(request: Request, pk: int, apartment_id: int) -> Response:
     """
     GET  — effective + extra permission codes for this user's membership on
@@ -290,6 +297,7 @@ def user_apartment_permissions(request: Request, pk: int, apartment_id: int) -> 
     POST — overwrite the membership's extra_permissions set.
            Body: {"permissions": ["diagnostics", "view_cameras", ...]}
     """
+    get_object_or_404(apartments_in_scope(request.user), pk=apartment_id)  # 404s if out of scope
     membership = get_object_or_404(
         ApartmentMembership, user_id=pk, apartment_id=apartment_id,
     )
@@ -351,11 +359,11 @@ def _apartment_summary(apartment: Apartment) -> dict:
 
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_management_list(request: Request) -> Response:
     if request.method == "POST":
         return _create_apartment(request)
-    apartments = Apartment.objects.all().order_by("name")
+    apartments = apartments_in_scope(request.user).order_by("name")
     return _ok({"apartments": [_apartment_summary(a) for a in apartments]})
 
 
@@ -365,19 +373,33 @@ def _create_apartment(request: Request) -> Response:
         return _err("name is required", "INVALID_PARAM", 400)
     if Apartment.objects.filter(name=name).exists():
         return _err(f"An apartment named '{name}' already exists", "DUPLICATE_NAME", 409)
+
+    building = (request.data.get("building") or "").strip()
+    if not request.user.is_staff:
+        # Building Owner can only create apartments inside a building they
+        # already own — default to it if they only own one and didn't
+        # specify, otherwise the given building must be one of theirs.
+        from .permissions import owned_buildings
+        owned = owned_buildings(request.user)
+        if not building and len(owned) == 1:
+            building = next(iter(owned))
+        if building not in owned:
+            return _err(
+                "building must be one you own — you can't create an apartment in a building you don't manage",
+                "INVALID_PARAM", 400,
+            )
+
     apartment = Apartment.objects.create(
-        name=name,
-        building=(request.data.get("building") or "").strip(),
-        floor=(request.data.get("floor") or "").strip(),
+        name=name, building=building, floor=(request.data.get("floor") or "").strip(),
     )
     log_action(request, "apartment_created", apartment=apartment)
     return _ok({"apartment": _apartment_summary(apartment)}, status_code=201)
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_management_detail(request: Request, pk: int) -> Response:
-    apartment = get_object_or_404(Apartment, pk=pk)
+    apartment = get_object_or_404(apartments_in_scope(request.user), pk=pk)
     summary = _apartment_summary(apartment)
     summary["rooms"] = [
         {"id": r.pk, "name": r.name, "device_count": r.devices.count()}
@@ -468,9 +490,9 @@ def apartment_plc(request: Request, pk: int) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @api_view(["GET", "POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_rooms(request: Request, pk: int) -> Response:
-    apartment = get_object_or_404(Apartment, pk=pk)
+    apartment = get_object_or_404(apartments_in_scope(request.user), pk=pk)
 
     if request.method == "POST":
         name = (request.data.get("name") or "").strip()
@@ -493,8 +515,9 @@ def apartment_rooms(request: Request, pk: int) -> Response:
 
 
 @api_view(["PATCH", "DELETE"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_room_detail(request: Request, pk: int, room_id: int) -> Response:
+    get_object_or_404(apartments_in_scope(request.user), pk=pk)  # 404s if out of scope
     room = get_object_or_404(Room, pk=room_id, apartment_id=pk)
 
     if request.method == "DELETE":
@@ -524,9 +547,10 @@ def apartment_room_detail(request: Request, pk: int, room_id: int) -> Response:
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_rooms_reorder(request: Request, pk: int) -> Response:
     """Body: {"order": [room_id, room_id, ...]} — sets sort_order = index."""
+    get_object_or_404(apartments_in_scope(request.user), pk=pk)  # 404s if out of scope
     order = request.data.get("order")
     if not isinstance(order, list):
         return _err("order must be a list of room ids", "INVALID_PARAM", 400)
@@ -557,15 +581,17 @@ def _device_summary(d: ApartmentDevice) -> dict:
 
 
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_devices(request: Request, pk: int) -> Response:
+    get_object_or_404(apartments_in_scope(request.user), pk=pk)  # 404s if out of scope
     devices = ApartmentDevice.objects.filter(apartment_id=pk).select_related("room")
     return _ok({"devices": [_device_summary(d) for d in devices]})
 
 
 @api_view(["PATCH"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_device_detail(request: Request, pk: int, device_id: int) -> Response:
+    get_object_or_404(apartments_in_scope(request.user), pk=pk)  # 404s if out of scope
     device = get_object_or_404(ApartmentDevice, pk=device_id, apartment_id=pk)
 
     if "name" in request.data:
@@ -587,9 +613,10 @@ def apartment_device_detail(request: Request, pk: int, device_id: int) -> Respon
 
 
 @api_view(["POST"])
-@permission_classes([IsAdminUser])
+@permission_classes([IsStaffOrBuildingOwner])
 def apartment_devices_reorder(request: Request, pk: int) -> Response:
     """Body: {"order": [device_id, ...]} — sets sort_order = index."""
+    get_object_or_404(apartments_in_scope(request.user), pk=pk)  # 404s if out of scope
     order = request.data.get("order")
     if not isinstance(order, list):
         return _err("order must be a list of device ids", "INVALID_PARAM", 400)

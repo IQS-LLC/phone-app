@@ -40,8 +40,6 @@ class _MainShellState extends State<MainShell> {
   void _openWizard()  => setState(() => _wizardMode = true);
   void _closeWizard() => setState(() => _wizardMode = false);
 
-  bool get _isStaff => widget.authState.user?.isStaff ?? false;
-
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -60,9 +58,11 @@ class _MainShellState extends State<MainShell> {
           index: _index,
           children: [
             DashboardScreen(
-              appState:   widget.appState,
-              authState:  widget.authState,
-              onOpenMap:  _openMap,
+              appState:        widget.appState,
+              authState:       widget.authState,
+              onOpenMap:       _openMap,
+              onOpenCommission: _openWizard,
+              onOpenMapEditor: _openEditor,
             ),
             LogScreen(appState: widget.appState),
             SettingsScreen(
@@ -106,29 +106,6 @@ class _MainShellState extends State<MainShell> {
           ),
         ),
 
-      // ── Staff floating action buttons (hidden while any overlay is open) ──
-      if (_isStaff && !_mapMode && !_editorMode && !_wizardMode)
-        Positioned(
-          right:  16,
-          bottom: MediaQuery.of(context).padding.bottom + 84,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              _StaffFab(
-                icon:  Icons.checklist_rounded,
-                label: 'Commission',
-                onTap: _openWizard,
-              ),
-              const SizedBox(height: 10),
-              _StaffFab(
-                icon:  Icons.edit_square,
-                label: 'Map Editor',
-                onTap: _openEditor,
-              ),
-            ],
-          ),
-        ),
     ]);
   }
 }
@@ -271,43 +248,3 @@ class _Tab {
   const _Tab({required this.icon, required this.iconOff, required this.label});
 }
 
-class _StaffFab extends StatelessWidget {
-  final IconData icon;
-  final String   label;
-  final VoidCallback onTap;
-
-  const _StaffFab({required this.icon, required this.label, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color:        C.surface,
-          borderRadius: BorderRadius.circular(24),
-          border:       Border.all(color: C.border, width: 0.5),
-          boxShadow: [
-            BoxShadow(
-              color:      Colors.black.withAlpha(80),
-              blurRadius: 12,
-              offset:     const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 16, color: C.accent),
-          const SizedBox(width: 7),
-          Text(label,
-              style: const TextStyle(
-                fontFamily: 'Inter',
-                fontSize:   12,
-                fontWeight: FontWeight.w700,
-                color:      C.accent,
-              )),
-        ]),
-      ),
-    );
-  }
-}

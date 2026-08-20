@@ -20,12 +20,16 @@ class DashboardScreen extends StatefulWidget {
   final AppState     appState;
   final AuthState    authState;
   final VoidCallback onOpenMap;
+  final VoidCallback onOpenCommission;
+  final VoidCallback onOpenMapEditor;
 
   const DashboardScreen({
     super.key,
     required this.appState,
     required this.authState,
     required this.onOpenMap,
+    required this.onOpenCommission,
+    required this.onOpenMapEditor,
   });
 
   @override
@@ -123,6 +127,19 @@ class _DashboardScreenState extends State<DashboardScreen>
 
   // ── State helpers ─────────────────────────────────────────────────────────
   int  _brightness(int ch) => _st.pendingBrightness[ch] ?? _st.state.dali[ch]  ?? 0;
+
+  /// Raising brightness uses undimDurationMs, lowering uses dimDurationMs —
+  /// matches how a real dimmer switch feels (snapping on faster than fading
+  /// off is the more natural default, hence the different defaults server-
+  /// side too). No change (v == current) skips the fade entirely.
+  int _fadeDurationFor(int channel, int target) {
+    final current = _brightness(channel);
+    if (target == current) return 0;
+    final user = widget.authState.user;
+    return target > current
+        ? (user?.undimDurationMs ?? 500)
+        : (user?.dimDurationMs   ?? 800);
+  }
   bool _relayOn(int ch)    => _st.pendingRelay[ch]      ?? _st.state.relays[ch] ?? false;
 
   List<DaliDevice>  _lights(String r) => _st.daliDevices .where((d) => d.room == r).toList();
@@ -150,7 +167,7 @@ class _DashboardScreenState extends State<DashboardScreen>
           brightness: _brightness,
           relayOn:    _relayOn,
           bColor:     _brightnessToColor,
-          onSetLight: (ch, v) => _st.setDaliBrightness(ch, v),
+          onSetLight: (ch, v) => _st.setDaliBrightness(ch, v, durationMs: _fadeDurationFor(ch, v)),
           onSetRoom:  (pct)   => _st.setRoomBrightness(room, pct),
           onSetRelay: (ch, v) => _st.setRelay(ch, v),
         ),
@@ -224,6 +241,31 @@ class _DashboardScreenState extends State<DashboardScreen>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
 
+                    // ── Tech Team quick actions ──────────────────────────
+                    if (widget.authState.user?.isStaff ?? false) ...[
+                      const SizedBox(height: 16),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: Row(children: [
+                          Expanded(
+                            child: _StaffActionButton(
+                              icon:  Icons.checklist_rounded,
+                              label: 'Commission',
+                              onTap: widget.onOpenCommission,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: _StaffActionButton(
+                              icon:  Icons.edit_square,
+                              label: 'Map Editor',
+                              onTap: widget.onOpenMapEditor,
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ],
+
                     // ── Home insights row ────────────────────────────────
                     const SizedBox(height: 20),
                     SizedBox(
@@ -272,6 +314,21 @@ class _DashboardScreenState extends State<DashboardScreen>
                           devices:  _st.relayDevices,
                           relayOn:  _relayOn,
                           onToggle: (ch, v) => _st.setRelay(ch, v),
+                        ),
+                      ),
+                    ],
+
+                    // ── Ventilators & Extra Lights ────────────────────────
+                    if ((widget.authState.user?.showVentilatorsHome ?? true) &&
+                        _st.toggleDevices.isNotEmpty) ...[
+                      _SectionLabel('ventilators & extra lights', top: 28),
+                      const SizedBox(height: 14),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: _VentilatorGrid(
+                          devices: _st.toggleDevices,
+                          isOn:    _st.effectiveToggle,
+                          onToggle: (varName, v) => _st.setToggle(varName, v),
                         ),
                       ),
                     ],
@@ -1009,6 +1066,115 @@ class _AtmosphereGrid extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Switch grid
 // ═══════════════════════════════════════════════════════════════════════════════
+
+class _StaffActionButton extends StatelessWidget {
+  final IconData icon;
+  final String   label;
+  final VoidCallback onTap;
+
+  const _StaffActionButton({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color:        C.surface,
+        borderRadius: BorderRadius.circular(14),
+        border:       Border.all(color: C.border, width: 0.5),
+      ),
+      child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 15, color: C.accent),
+        const SizedBox(width: 7),
+        Text(label,
+            style: const TextStyle(
+              fontFamily: 'Inter', fontSize: 12,
+              fontWeight: FontWeight.w700, color: C.accent,
+            )),
+      ]),
+    ),
+  );
+}
+
+class _VentilatorGrid extends StatelessWidget {
+  final List<ToggleDevice> devices;
+  final bool Function(String) isOn;
+  final void Function(String, bool) onToggle;
+
+  const _VentilatorGrid({
+    required this.devices, required this.isOn, required this.onToggle});
+
+  IconData _iconFor(String name) {
+    final n = name.toLowerCase();
+    if (n.contains('ventilator')) return Icons.air_rounded;
+    if (n.contains('balcony')) return Icons.balcony_rounded;
+    if (n.contains('mirror')) return Icons.wb_incandescent_rounded;
+    return Icons.lightbulb_outline_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) => GridView.builder(
+    shrinkWrap: true,
+    physics: const NeverScrollableScrollPhysics(),
+    itemCount: devices.length,
+    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+      crossAxisCount: 2, crossAxisSpacing: 12,
+      mainAxisSpacing: 12, childAspectRatio: 2.0,
+    ),
+    itemBuilder: (_, i) {
+      final d  = devices[i];
+      final on = isOn(d.varName);
+      return AnimatedContainer(
+        duration: Dur.normal,
+        decoration: BoxDecoration(
+          color: on ? C.green.withAlpha(15) : C.card,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: on ? C.green.withAlpha(60) : C.border, width: 0.5)),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(children: [
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(_iconFor(d.name), color: on ? C.green : C.textTri, size: 18),
+                const SizedBox(height: 5),
+                Text(d.name,
+                  style: AppText.small.copyWith(
+                    color: on ? C.textPri : C.textSec,
+                    fontWeight: on ? FontWeight.w600 : FontWeight.w400,
+                    fontSize: 11),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              ],
+            )),
+            if (d.writable)
+              Switch(
+                value: on,
+                onChanged: (v) {
+                  HapticFeedback.selectionClick();
+                  onToggle(d.varName, v);
+                },
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              )
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: (on ? C.green : C.textTri).withAlpha(18),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(on ? 'ON' : 'OFF', style: AppText.small.copyWith(
+                  color: on ? C.green : C.textTri, fontWeight: FontWeight.w600, fontSize: 10,
+                )),
+              ),
+          ]),
+        ),
+      );
+    },
+  );
+}
 
 class _SwitchGrid extends StatelessWidget {
   final List<RelayDevice>        devices;

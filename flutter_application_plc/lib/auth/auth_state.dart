@@ -227,7 +227,12 @@ class AuthState extends ChangeNotifier {
     final j = _decodeOk(await _request('GET', '/auth/apartments/', timeout: const Duration(seconds: 8)));
     if (j == null) return;
     final apartments = j['apartments'] as List<dynamic>;
-    _hasInstallerAccess = apartments.any((a) {
+    // Tech Team always sees Device Management regardless of what role their
+    // own ApartmentMembership happens to carry — Owner no longer implies
+    // any technical permission (see ApartmentMembership.DEFAULT_ROLE_PERMISSIONS
+    // server-side), so an is_staff account with only an Owner-role membership
+    // must not lose this section along with real Owners.
+    _hasInstallerAccess = (_user?.isStaff ?? false) || apartments.any((a) {
       final perms = (a as Map<String, dynamic>)['permissions'] as List<dynamic>? ?? [];
       return perms.any((p) => _installerPermissions.contains(p));
     });
@@ -248,6 +253,32 @@ class AuthState extends ChangeNotifier {
   Future<bool> updatePushNotifications(bool enabled) async {
     final j = _decodeOk(await _request(
       'PATCH', '/auth/me/', body: jsonEncode({'push_notifications': enabled}),
+      timeout: const Duration(seconds: 8),
+    ));
+    if (j == null) return false;
+    _user = AuthUser.fromJson(j['user'] as Map<String, dynamic>);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> updateShowVentilatorsHome(bool enabled) async {
+    final j = _decodeOk(await _request(
+      'PATCH', '/auth/me/', body: jsonEncode({'show_ventilators_home': enabled}),
+      timeout: const Duration(seconds: 8),
+    ));
+    if (j == null) return false;
+    _user = AuthUser.fromJson(j['user'] as Map<String, dynamic>);
+    notifyListeners();
+    return true;
+  }
+
+  Future<bool> updateFadeDurations({int? dimMs, int? undimMs}) async {
+    final body = <String, dynamic>{};
+    if (dimMs != null)   body['dim_duration_ms']   = dimMs;
+    if (undimMs != null) body['undim_duration_ms'] = undimMs;
+    if (body.isEmpty) return true;
+    final j = _decodeOk(await _request(
+      'PATCH', '/auth/me/', body: jsonEncode(body),
       timeout: const Duration(seconds: 8),
     ));
     if (j == null) return false;

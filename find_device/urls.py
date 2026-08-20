@@ -1,5 +1,8 @@
 from django.urls import path
-from . import views, auth_views, device_views, user_management_views, map_views, commissioning_views
+from . import (
+    views, auth_views, device_views, user_management_views, map_views,
+    commissioning_views, relabel_views, automation_views, superscan_views,
+)
 from .discovery import views as discovery_views
 from .realtime import views as realtime_views
 
@@ -26,6 +29,9 @@ urlpatterns = [
 
     # ── Smart appliances ─────────────────────────────────────────────────────
     path('appliance/<str:gvl_name>/',       views.set_appliance),
+
+    # ── Named relays/lights (ventilators, balcony/mirror/var lights, etc.) ──
+    path('toggle/<str:var_name>/',          views.set_toggle),
 
     # ── Sensors (read-only) ──────────────────────────────────────────────────
     path('sensors/',                        views.get_sensors),
@@ -115,6 +121,47 @@ commissioning_urlpatterns = [
     path('<int:apartment_id>/checklist/', commissioning_views.checklist, name='commissioning-checklist'),
     path('<int:apartment_id>/test-io/',   commissioning_views.test_io,   name='commissioning-test-io'),
     path('<int:apartment_id>/summary/',   commissioning_views.summary,   name='commissioning-summary'),
+]
+
+# Mounted at /relabel/ in PLC_Project/urls.py — is_staff (IT Team) ONLY, see
+# has_relabel_access. Lets them walk every output channel (DALI/relay/
+# curtain), flash it, and fix its room/name; and separately watch every raw
+# input channel (switch/motion/door/window sensor) live so a physical
+# switch press or sensor trip is visibly identifiable before assigning it.
+# Independent of the (also is_staff-only) commissioning wizard.
+relabel_urlpatterns = [
+    path('<int:apartment_id>/outputs/<str:device_type>/',
+         relabel_views.list_output_channels, name='relabel-outputs'),
+    path('<int:apartment_id>/outputs/<str:device_type>/<int:channel>/flash/',
+         relabel_views.flash_output_channel, name='relabel-outputs-flash'),
+    path('<int:apartment_id>/outputs/<str:device_type>/<int:channel>/assign/',
+         relabel_views.assign_output_channel, name='relabel-outputs-assign'),
+
+    path('<int:apartment_id>/inputs/',        relabel_views.list_inputs,  name='relabel-inputs'),
+    path('<int:apartment_id>/inputs/assign/', relabel_views.assign_input, name='relabel-inputs-assign'),
+]
+
+# Mounted at /automations/ in PLC_Project/urls.py — is_staff (IT Team) ONLY,
+# same has_relabel_access bar as relabel_urlpatterns above. "When this
+# input does X, do Y to that output" configured from the phone — see
+# AutomationRule docstring for why this is additive, never a replacement
+# for whatever's already hardwired in the PLC's own program.
+automation_urlpatterns = [
+    path('<int:apartment_id>/rules/',            automation_views.rule_list,   name='automation-rules'),
+    path('<int:apartment_id>/rules/<int:rule_id>/', automation_views.rule_detail, name='automation-rule-detail'),
+]
+
+# Mounted at /superscan/ in PLC_Project/urls.py — is_staff (IT Team) ONLY.
+# Generic discovery/capability-mapping/safe-testing tool — see superscan.py
+# module docstring. Deliberately never exposed to Building Owner/resident,
+# same as relabel_urlpatterns/automation_urlpatterns above.
+superscan_urlpatterns = [
+    path('<int:apartment_id>/start/',                    superscan_views.start,             name='superscan-start'),
+    path('<int:apartment_id>/runs/',                      superscan_views.run_list,          name='superscan-runs'),
+    path('<int:apartment_id>/runs/<int:scan_id>/',        superscan_views.run_status,        name='superscan-run-status'),
+    path('<int:apartment_id>/runs/<int:scan_id>/stop/',   superscan_views.stop,               name='superscan-run-stop'),
+    path('<int:apartment_id>/capabilities/',              superscan_views.capability_list,   name='superscan-capabilities'),
+    path('<int:apartment_id>/capabilities/<int:cap_id>/', superscan_views.capability_detail,  name='superscan-capability-detail'),
 ]
 
 # Mounted at /map/ in PLC_Project/urls.py

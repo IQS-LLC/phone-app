@@ -57,6 +57,25 @@ class ApplianceDevice {
   );
 }
 
+class ToggleDevice {
+  final String varName;
+  final String name;
+  final String room;
+  final bool   writable;
+  const ToggleDevice({
+    required this.varName,
+    required this.name,
+    required this.room,
+    required this.writable,
+  });
+  factory ToggleDevice.fromJson(Map<String, dynamic> j) => ToggleDevice(
+    varName:  j['var_name'] as String,
+    name:     j['name']     as String,
+    room:     j['room']     as String,
+    writable: j['writable'] as bool? ?? true,
+  );
+}
+
 class SensorDevice {
   final int    index;
   final String sensorType; // 'door' | 'window' | 'motion'
@@ -138,6 +157,7 @@ class SystemState {
   final Map<int, bool?>     windowSensors;  // index   → open
   final Map<int, bool?>     motionSensors;  // index   → detected
   final Map<String, bool?>  appliances;     // gvl_name → on/off
+  final Map<String, bool?>  toggles;        // var_name → on/off
   final SecurityState       security;
 
   const SystemState({
@@ -153,6 +173,7 @@ class SystemState {
     required this.windowSensors,
     required this.motionSensors,
     required this.appliances,
+    required this.toggles,
     required this.security,
   });
 
@@ -165,6 +186,7 @@ class SystemState {
     Map<int, bool?>    windowSensors = {};
     Map<int, bool?>    motionSensors = {};
     Map<String, bool?> appliances    = {};
+    Map<String, bool?> toggles       = {};
 
     (j['dali']    as Map<String, dynamic>? ?? {}).forEach((k, v) {
       dali[int.parse(k)] = v as int?;
@@ -190,6 +212,9 @@ class SystemState {
     (j['appliances'] as Map<String, dynamic>? ?? {}).forEach((k, v) {
       appliances[k] = v as bool?;
     });
+    (j['toggles'] as Map<String, dynamic>? ?? {}).forEach((k, v) {
+      toggles[k] = v as bool?;
+    });
 
     final sec = j['security'] as Map<String, dynamic>?;
 
@@ -206,6 +231,7 @@ class SystemState {
       windowSensors: windowSensors,
       motionSensors: motionSensors,
       appliances:    appliances,
+      toggles:       toggles,
       security:      sec != null ? SecurityState.fromJson(sec) : SecurityState.empty,
     );
   }
@@ -215,7 +241,7 @@ class SystemState {
     plcConnected: false, modbusConnected: false,
     dali: {}, relays: {}, curtains: {}, switches: {},
     doorSensors: {}, windowSensors: {}, motionSensors: {},
-    appliances: {}, security: SecurityState.empty,
+    appliances: {}, toggles: {}, security: SecurityState.empty,
   );
 }
 

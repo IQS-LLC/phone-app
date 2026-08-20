@@ -69,11 +69,18 @@ class ApartmentMembership(models.Model):
     # custom_role is set. Defined here (not in the DB) so the common case
     # costs zero extra queries. See Role/Permission below for fully custom,
     # per-building configurable roles.
+    # Owner (the homeowner — whether they live there or rent it out) is
+    # deliberately NOT a technical/admin role: same device-control surface
+    # as Resident, plus only the ability to manage their own household
+    # (invite/remove their own family members or renters). No PLC/settings/
+    # configuration access of any kind — that's exclusively IT Team
+    # (is_staff) and, above the apartment level, a Building Owner. See
+    # has_relabel_access in permissions.py, which is is_staff-only for
+    # exactly this reason.
     DEFAULT_ROLE_PERMISSIONS = {
         ROLE_OWNER: {
             "view", "control_devices", "create_automations", "edit_automations",
-            "view_history", "change_settings", "manage_users",
-            "plc_connection_settings", "notification_settings", "emergency_controls",
+            "view_history", "manage_users", "notification_settings", "emergency_controls",
         },
         ROLE_RESIDENT: {
             "view", "control_devices", "create_automations", "view_history",
@@ -133,6 +140,45 @@ class ApartmentMembership(models.Model):
                 user=self.user, is_default=True,
             ).exclude(pk=self.pk).update(is_default=False)
         super().save(*args, **kwargs)
+
+
+class BuildingMembership(models.Model):
+    """
+    Grants a User elevated access across every Apartment sharing the same
+    Apartment.building value — a tier above ApartmentMembership, for someone
+    who owns/manages the whole building rather than one unit.
+
+    Deliberately separate from ApartmentMembership rather than "just another
+    role" on it: this permission surface spans MANY apartments (user
+    management, apartment management across the building), which
+    ApartmentMembership has no way to express since it's scoped to exactly
+    one apartment.
+
+    Building Owner gets IT-Team-equivalent access to user/apartment
+    management, but NOT PLC/device commissioning or the light-relabel tool
+    — that stays exclusively is_staff, on purpose (see has_relabel_access
+    in permissions.py). Matches Apartment.building by plain string equality;
+    there's no separate Building model since nothing today needs building
+    metadata beyond a shared name to group apartments by.
+    """
+
+    ROLE_OWNER = "owner"
+    ROLE_CHOICES = [
+        (ROLE_OWNER, "Building Owner"),
+    ]
+
+    user       = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="building_memberships",
+    )
+    building   = models.CharField(max_length=200)
+    role       = models.CharField(max_length=12, choices=ROLE_CHOICES, default=ROLE_OWNER)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [("user", "building")]
+
+    def __str__(self) -> str:
+        return f"{self.user.username} -> {self.building} ({self.role})"
 
 
 class PLCDevice(models.Model):
@@ -233,7 +279,21 @@ class ApartmentDevice(models.Model):
       switch           -> BTicino switch index
       curtain          -> curtain motor index
       door_sensor / window_sensor / motion_sensor -> sensor index
-      appliance        -> unused (gvl_name carries the identity instead)
+      appliance / toggle / named_switch -> unused (gvl_name carries the
+      identity instead)
+
+    toggle is a plain named BOOL relay/light living directly under gvlDALI
+    (e.g. "bBalconLightRaley", "bMirrorLight") — distinct from appliance,
+    which targets gvlIO.bPy{name}Cmd/State (no real hardware exists there
+    yet). gvl_name for a toggle device is the exact variable name after
+    "gvlDALI." — see devices.NamedRelay.
+
+    named_switch is the read-only input-side counterpart: a physical
+    push-button wired straight into POU_Controller with its own unique
+    name (e.g. "bVentilatorGuestButton") rather than a numbered slot in
+    the bSwitchOn1..48 array SwitchInput expects — see devices.
+    NamedSwitchInput. Exists so these buttons can be used as Automation
+    triggers even though they don't fit the indexed switch model.
     """
 
     TYPE_DALI          = "dali"
@@ -244,6 +304,8 @@ class ApartmentDevice(models.Model):
     TYPE_DOOR_SENSOR   = "door_sensor"
     TYPE_WINDOW_SENSOR = "window_sensor"
     TYPE_MOTION_SENSOR = "motion_sensor"
+    TYPE_TOGGLE        = "toggle"
+    TYPE_NAMED_SWITCH  = "named_switch"
     TYPE_CHOICES = [
         (TYPE_DALI, "DALI dimmer"),
         (TYPE_RELAY, "Wall relay"),
@@ -253,6 +315,8 @@ class ApartmentDevice(models.Model):
         (TYPE_DOOR_SENSOR, "Door sensor"),
         (TYPE_WINDOW_SENSOR, "Window sensor"),
         (TYPE_MOTION_SENSOR, "Motion sensor"),
+        (TYPE_TOGGLE, "Named relay/light"),
+        (TYPE_NAMED_SWITCH, "Named switch input"),
     ]
 
     apartment        = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="devices")
@@ -274,6 +338,64 @@ class ApartmentDevice(models.Model):
         return f"{self.apartment.name} / {self.device_type}[{ident}] {self.name}"
 
 
+class AutomationRule(models.Model):
+    """
+    "When this input does X, do Y to that output" — configured entirely
+    through the phone, no TwinCAT/ST code involved. Executed by
+    DeviceRegistry subscribing to trigger_device's raw ADS variable via
+    NotificationManager (find_device/plc/ads_notifications.py — instant,
+    event-driven push, not polling) and writing action_device the moment
+    trigger_device's value matches trigger_state.
+
+    Deliberately ADDITIVE, never a replacement: whatever's already
+    hardwired inside the PLC's own program for a given switch/sensor keeps
+    running completely unchanged. A rule here is a second, independent
+    reaction to the same physical event — it does not, and cannot, disable
+    or rewire the PLC's existing logic. Actually reassigning what a
+    hardwired switch does requires editing the TwinCAT program itself, a
+    separate and far riskier change (see docs / project memory on this).
+
+    is_staff (IT Team) only, same bar as the light-relabel tool — an
+    automation rule IS the "no more hand-written PLC code" capability the
+    building owner isn't meant to know exists as a raw technical tool.
+    """
+
+    TRIGGER_TYPES = (
+        ApartmentDevice.TYPE_SWITCH, ApartmentDevice.TYPE_MOTION_SENSOR,
+        ApartmentDevice.TYPE_DOOR_SENSOR, ApartmentDevice.TYPE_WINDOW_SENSOR,
+        ApartmentDevice.TYPE_NAMED_SWITCH,
+    )
+    ACTION_TYPES = (
+        ApartmentDevice.TYPE_DALI, ApartmentDevice.TYPE_RELAY,
+        ApartmentDevice.TYPE_CURTAIN, ApartmentDevice.TYPE_APPLIANCE,
+        ApartmentDevice.TYPE_TOGGLE,
+    )
+
+    apartment      = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="automation_rules")
+    name           = models.CharField(max_length=100)
+    enabled        = models.BooleanField(default=True)
+    trigger_device = models.ForeignKey(
+        ApartmentDevice, on_delete=models.CASCADE, related_name="automation_triggers",
+    )
+    # Fires when trigger_device's boolean state BECOMES this value — covers
+    # both "on press/activate" (True) and "on release/clear" (False).
+    trigger_state  = models.BooleanField()
+    action_device  = models.ForeignKey(
+        ApartmentDevice, on_delete=models.CASCADE, related_name="automation_actions",
+    )
+    # Interpreted per action_device.device_type: dali -> "0"-"100" (percent),
+    # relay/appliance/toggle -> "true"/"false", curtain -> "stop"/"up"/"down".
+    action_value   = models.CharField(max_length=20)
+    created_by     = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.apartment.name}: {self.name}"
+
+
 class UserProfile(models.Model):
     """Per-user preferences — auto-created on User creation via signal."""
 
@@ -288,6 +410,13 @@ class UserProfile(models.Model):
         max_length=10, choices=THEME_CHOICES, default=THEME_DARK,
     )
     push_notifications_enabled = models.BooleanField(default=True)
+    show_ventilators_home = models.BooleanField(default=True)
+    # DALI fade duration in ms. Applies only to continuously-dimmable DALI
+    # channels — relays/curtains are binary and stay instant regardless of
+    # these. Global per-user for now; per-light override is a real future
+    # option, not built until there's an actual need for it.
+    dim_duration_ms   = models.PositiveIntegerField(default=800)
+    undim_duration_ms = models.PositiveIntegerField(default=500)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -760,3 +889,201 @@ class MapVersion(models.Model):
     def __str__(self) -> str:
         tag = " [published]" if self.is_published else ""
         return f"{self.layout.apartment.name} v{self.version_number}{tag}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SuperScan — discovery / capability-mapping knowledge layer
+#
+# ScanRun               : one execution of the scan (mode, progress, summary).
+# DiscoveredCapability   : persistent, updated-in-place row per capability —
+#                          IS the "Device" + "Capability" the spec asked for
+#                          merged into one, since in this system a capability
+#                          already maps 1:1 onto a channel/gvl_name and
+#                          duplicating that as two tables would just be two
+#                          copies of the same identity. Cross-references
+#                          ApartmentDevice when the capability is already a
+#                          modeled, in-use device; is_known_type=False marks
+#                          genuinely unrecognized symbols pulled from
+#                          DiscoveryCache that don't correspond to anything
+#                          the app's device classes understand yet.
+# CapabilityTestLog      : one row per individual probe — the actual
+#                          INPUT → COMMAND → RESPONSE → STATE-CHANGE
+#                          correlation record the spec asked for by name.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ScanRun(models.Model):
+    MODE_PASSIVE = "passive"  # zero commands sent — enumerate + snapshot only
+    MODE_QUICK   = "quick"    # same as passive, alias kept for the UI's own naming
+    MODE_FULL    = "full"     # + safe active tests on already-modeled devices
+    MODE_DEEP    = "deep"     # + cross-reference DiscoveryCache for unknowns
+    MODE_CHOICES = [
+        (MODE_PASSIVE, "Passive — observe only, zero commands sent"),
+        (MODE_QUICK,   "Quick — passive discovery of existing entities/state"),
+        (MODE_FULL,    "Full — quick scan + safe capability tests"),
+        (MODE_DEEP,    "Deep SuperScan — full scan + unknown-symbol correlation"),
+    ]
+
+    STATUS_RUNNING   = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_STOPPED   = "stopped"
+    STATUS_FAILED    = "failed"
+    STATUS_CHOICES = [
+        (STATUS_RUNNING,   "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_STOPPED,   "Stopped by user"),
+        (STATUS_FAILED,    "Failed"),
+    ]
+
+    apartment    = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="scan_runs")
+    mode         = models.CharField(max_length=10, choices=MODE_CHOICES)
+    status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    started_by   = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    started_at   = models.DateTimeField(auto_now_add=True)
+    finished_at  = models.DateTimeField(null=True, blank=True)
+
+    # Checked between every step by the running background thread — the
+    # STOP SCAN control the spec requires at all times during an active scan.
+    cancel_requested = models.BooleanField(default=False)
+
+    progress_current = models.PositiveIntegerField(default=0)
+    progress_total    = models.PositiveIntegerField(default=0)
+    progress_label    = models.CharField(max_length=200, blank=True)
+
+    devices_discovered      = models.PositiveIntegerField(default=0)
+    capabilities_discovered = models.PositiveIntegerField(default=0)
+    capabilities_tested     = models.PositiveIntegerField(default=0)
+    tests_passed            = models.PositiveIntegerField(default=0)
+    tests_failed            = models.PositiveIntegerField(default=0)
+    unknown_count            = models.PositiveIntegerField(default=0)
+    new_since_last           = models.PositiveIntegerField(default=0)
+    changed_since_last       = models.PositiveIntegerField(default=0)
+    removed_since_last       = models.PositiveIntegerField(default=0)
+
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self) -> str:
+        return f"ScanRun({self.apartment.name}, {self.mode}, {self.status})"
+
+
+class DiscoveredCapability(models.Model):
+    DIRECTION_INPUT  = "input"
+    DIRECTION_OUTPUT = "output"
+    DIRECTION_BOTH   = "both"
+    DIRECTION_CHOICES = [
+        (DIRECTION_INPUT,  "Input (sensor/switch — read-only)"),
+        (DIRECTION_OUTPUT, "Output (controllable)"),
+        (DIRECTION_BOTH,   "Both (read + write)"),
+    ]
+
+    TEST_NOT_TESTED  = "not_tested"
+    TEST_OBSERVED    = "observed"       # DISCOVERED — NOT ACTIVELY TESTED
+    TEST_PASSED      = "tested_ok"
+    TEST_FAILED      = "tested_failed"
+    TEST_CHOICES = [
+        (TEST_NOT_TESTED, "Not tested"),
+        (TEST_OBSERVED,   "Discovered — not actively tested"),
+        (TEST_PASSED,     "Tested — passed"),
+        (TEST_FAILED,     "Tested — failed"),
+    ]
+
+    apartment        = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="discovered_capabilities")
+    apartment_device = models.ForeignKey(
+        ApartmentDevice, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="discovered_capabilities",
+        help_text="Set when this capability corresponds to an already-modeled ApartmentDevice row.",
+    )
+
+    device_type   = models.CharField(max_length=30)   # dali / relay / switch / curtain / toggle / named_switch / motion_sensor / unknown_symbol / ...
+    identifier    = models.CharField(max_length=100)  # channel number, gvl_name, or raw symbol name — the stable key
+    name          = models.CharField(max_length=150, blank=True)
+    room          = models.CharField(max_length=100, blank=True)
+    direction     = models.CharField(max_length=10, choices=DIRECTION_CHOICES, default=DIRECTION_OUTPUT)
+
+    is_known_type = models.BooleanField(default=True)   # False = raw symbol with no matching device class
+    raw_var_name  = models.CharField(max_length=200, blank=True)
+    data_type     = models.CharField(max_length=40, blank=True)   # bool / percent / int / string / ...
+    valid_range   = models.CharField(max_length=100, blank=True)  # human-readable, e.g. "0-100" or "true/false"
+
+    test_status   = models.CharField(max_length=15, choices=TEST_CHOICES, default=TEST_NOT_TESTED)
+    confidence    = models.CharField(max_length=10, default="high")  # high / medium / low
+    physical_effect_confirmed = models.BooleanField(default=False)
+    can_safely_test = models.BooleanField(default=True)
+
+    last_value     = models.CharField(max_length=100, blank=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    first_seen_at  = models.DateTimeField(auto_now_add=True)
+    last_seen_scan = models.ForeignKey(ScanRun, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    still_present  = models.BooleanField(default=True)  # False once a scan no longer finds it
+
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        unique_together = [("apartment", "device_type", "identifier")]
+        ordering = ["device_type", "identifier"]
+
+    def __str__(self) -> str:
+        return f"{self.apartment.name}/{self.device_type}[{self.identifier}] {self.name}"
+
+    def to_dict(self) -> dict:
+        return {
+            "id":            self.pk,
+            "apartment_device_id": self.apartment_device_id,
+            "device_type":   self.device_type,
+            "identifier":    self.identifier,
+            "name":          self.name,
+            "room":          self.room,
+            "direction":     self.direction,
+            "is_known_type": self.is_known_type,
+            "raw_var_name":  self.raw_var_name,
+            "data_type":     self.data_type,
+            "valid_range":   self.valid_range,
+            "test_status":   self.test_status,
+            "confidence":    self.confidence,
+            "physical_effect_confirmed": self.physical_effect_confirmed,
+            "can_safely_test": self.can_safely_test,
+            "last_value":    self.last_value,
+            "last_tested_at": self.last_tested_at.isoformat() if self.last_tested_at else None,
+            "first_seen_at": self.first_seen_at.isoformat(),
+            "still_present": self.still_present,
+            "notes":         self.notes,
+        }
+
+
+class CapabilityTestLog(models.Model):
+    """
+    One row per individual probe. This is the literal
+    INPUT -> COMMAND/SIGNAL -> DEVICE -> RESPONSE -> STATE CHANGE
+    correlation record.
+    """
+    capability = models.ForeignKey(DiscoveredCapability, on_delete=models.CASCADE, related_name="test_logs")
+    scan_run   = models.ForeignKey(ScanRun, on_delete=models.SET_NULL, null=True, blank=True, related_name="test_logs")
+    timestamp  = models.DateTimeField(auto_now_add=True)
+
+    command_sent = models.CharField(max_length=100, blank=True)
+    params       = models.JSONField(default=dict, blank=True)
+    state_before = models.CharField(max_length=100, blank=True)
+    state_after  = models.CharField(max_length=100, blank=True)
+    response     = models.CharField(max_length=200, blank=True)
+    success      = models.BooleanField(default=False)
+    latency_ms   = models.FloatField(null=True, blank=True)
+    error        = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+
+    def to_dict(self) -> dict:
+        return {
+            "id":           self.pk,
+            "timestamp":    self.timestamp.isoformat(),
+            "command_sent": self.command_sent,
+            "params":       self.params,
+            "state_before": self.state_before,
+            "state_after":  self.state_after,
+            "response":     self.response,
+            "success":      self.success,
+            "latency_ms":   self.latency_ms,
+            "error":        self.error,
+        }

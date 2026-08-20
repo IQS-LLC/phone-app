@@ -96,6 +96,11 @@ def _user_dict(user: User) -> dict:
         "push_notifications": (
             profile.push_notifications_enabled if profile else True
         ),
+        "show_ventilators_home": (
+            profile.show_ventilators_home if profile else True
+        ),
+        "dim_duration_ms":   profile.dim_duration_ms   if profile else 800,
+        "undim_duration_ms": profile.undim_duration_ms if profile else 500,
     }
 
 
@@ -278,7 +283,8 @@ def refresh_token(request: Request) -> Response:
 def me(request: Request) -> Response:
     """
     GET  — return the authenticated user's profile.
-    PATCH — update theme or push_notifications.
+    PATCH — update theme, push_notifications, show_ventilators_home,
+    dim_duration_ms, or undim_duration_ms.
     """
     user = request.user
 
@@ -299,6 +305,24 @@ def me(request: Request) -> Response:
     if "push_notifications" in request.data:
         profile.push_notifications_enabled = bool(request.data["push_notifications"])
         updated.append("push_notifications")
+
+    if "show_ventilators_home" in request.data:
+        profile.show_ventilators_home = bool(request.data["show_ventilators_home"])
+        updated.append("show_ventilators_home")
+
+    # 100ms floor: below this a "fade" is indistinguishable from instant but
+    # still costs a background thread + several ADS writes for nothing.
+    # 5000ms ceiling: past this it reads as broken/unresponsive, not smooth.
+    for field in ("dim_duration_ms", "undim_duration_ms"):
+        if field in request.data:
+            try:
+                ms = int(request.data[field])
+            except (TypeError, ValueError):
+                return _err(f"{field} must be an integer", "INVALID_PARAM")
+            if not 100 <= ms <= 5000:
+                return _err(f"{field} must be 100-5000", "INVALID_PARAM")
+            setattr(profile, field, ms)
+            updated.append(field)
 
     if "first_name" in request.data:
         user.first_name = str(request.data["first_name"])[:50]

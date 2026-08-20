@@ -12,6 +12,9 @@ from find_device.urls import (
     realtime_urlpatterns,
     map_urlpatterns,
     commissioning_urlpatterns,
+    relabel_urlpatterns,
+    automation_urlpatterns,
+    superscan_urlpatterns,
 )
 
 
@@ -49,4 +52,13 @@ urlpatterns = [
 
     # ── Commissioning Wizard (Tech Team only — is_staff required on all routes)
     path('commissioning/',    include(commissioning_urlpatterns)),
+
+    # ── Light relabel/identify (Tech Team, or owner/installer on that apartment)
+    path('relabel/',          include(relabel_urlpatterns)),
+
+    # ── Automations — "no more hand-written PLC code" (Tech Team only)
+    path('automations/',      include(automation_urlpatterns)),
+
+    # ── SuperScan — discovery/capability-mapping (Tech Team only) ────────────
+    path('superscan/',        include(superscan_urlpatterns)),
 ]

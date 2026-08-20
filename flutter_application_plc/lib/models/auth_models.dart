@@ -13,6 +13,9 @@ class AuthUser {
   final String theme;
   final bool   pushNotifications;
   final bool   isStaff; // Tech Team — gates the in-app admin/user-management section
+  final bool   showVentilatorsHome; // show Ventilators & Extra Lights on the Home tab
+  final int    dimDurationMs;   // DALI fade duration when lowering brightness
+  final int    undimDurationMs; // DALI fade duration when raising brightness
 
   const AuthUser({
     required this.id,
@@ -23,6 +26,9 @@ class AuthUser {
     this.theme     = 'dark',
     this.pushNotifications = true,
     this.isStaff = false,
+    this.showVentilatorsHome = true,
+    this.dimDurationMs = 800,
+    this.undimDurationMs = 500,
   });
 
   String get displayName {
@@ -39,6 +45,9 @@ class AuthUser {
     theme:             j['theme']               as String? ?? 'dark',
     pushNotifications: j['push_notifications']  as bool? ?? true,
     isStaff:           j['is_staff']            as bool? ?? false,
+    showVentilatorsHome: j['show_ventilators_home'] as bool? ?? true,
+    dimDurationMs:    j['dim_duration_ms']   as int? ?? 800,
+    undimDurationMs:  j['undim_duration_ms'] as int? ?? 500,
   );
 
   Map<String, dynamic> toJson() => {
@@ -50,6 +59,9 @@ class AuthUser {
     'theme':              theme,
     'push_notifications': pushNotifications,
     'is_staff':           isStaff,
+    'show_ventilators_home': showVentilatorsHome,
+    'dim_duration_ms':    dimDurationMs,
+    'undim_duration_ms':  undimDurationMs,
   };
 }
 

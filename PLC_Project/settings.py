@@ -170,6 +170,11 @@ if not DEBUG and os.getenv("HTTPS_ENABLED", "False").lower() == "true":
     # plain HTTP, so SECURE_SSL_REDIRECT sees "not HTTPS" and redirects,
     # forever. nginx.conf must set X-Forwarded-Proto for this to be correct.
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # Docker's own healthcheck hits gunicorn directly on localhost:8000,
+    # bypassing nginx entirely — no X-Forwarded-Proto header there, so
+    # SECURE_SSL_REDIRECT would 301 it to https on a port that only ever
+    # speaks plain HTTP, hanging the single gunicorn worker until timeout.
+    SECURE_REDIRECT_EXEMPT = [r"^health/?$"]
 
 # ── Structured logging ────────────────────────────────────────────────────────
 
@@ -314,10 +319,13 @@ CELERY_TASK_ROUTES = {
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
-    # Poll every registered PLC device every 2 s
+    # Poll every registered PLC device every 1 s — matches AppState's
+    # client poll interval (see its comment, 2026-08-19: this is as fast as
+    # this WinCE CX8190's ADS layer can safely sustain without repeating
+    # the connection instability this session spent hours fixing).
     "poll-plc-state": {
         "task":     "find_device.tasks.poll_plc_state",
-        "schedule": 2.0,
+        "schedule": 1.0,
         "options":  {"queue": "plc"},
     },
     # Alarm threshold check every 5 s

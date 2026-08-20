@@ -71,6 +71,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RelayDevice>     _relayDevices     = [];
   List<CurtainDevice>   _curtainDevices   = [];
   List<ApplianceDevice> _applianceDevices = [];
+  List<ToggleDevice>    _toggleDevices    = [];
   List<SensorDevice>    _doorSensors      = [];
   List<SensorDevice>    _windowSensors    = [];
   List<SensorDevice>    _motionSensors    = [];
@@ -82,6 +83,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<RelayDevice>     get relayDevices     => _relayDevices;
   List<CurtainDevice>   get curtainDevices   => _curtainDevices;
   List<ApplianceDevice> get applianceDevices => _applianceDevices;
+  List<ToggleDevice>    get toggleDevices    => _toggleDevices;
   List<SensorDevice>    get doorSensors      => _doorSensors;
   List<SensorDevice>    get windowSensors    => _windowSensors;
   List<SensorDevice>    get motionSensors    => _motionSensors;
@@ -111,13 +113,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // request on top of ones still in flight, unboundedly.
   bool   _polling            = false;
 
-  static const _fastInterval = Duration(seconds: 2);
+  // Was 2s. Tightened to 1s — as fast as this specific PLC's ADS layer can
+  // safely sustain. Went deep on this 2026-08-19: the CX8190 here is
+  // Windows CE, has repeatedly proven unable to hold a stable ADS session
+  // under load (hours of live debugging, documented in project memory),
+  // and every read still crosses phone → internet → tunnel → server → LAN
+  // → PLC and back. Sub-100ms polling would multiply load on hardware
+  // that's already the bottleneck and risk the exact instability this
+  // session spent hours fixing, for no perceptible UI benefit (human
+  // reaction time is ~100-200ms; nothing below that is felt). Real
+  // responsiveness for user actions comes from optimistic UI (every
+  // setXxx() below updates state and notifies before the network call
+  // even returns), not poll frequency.
+  static const _fastInterval = Duration(seconds: 1);
 
   // ── Optimistic / pending updates ───────────────────────────────────────────
   final Map<int, int>    _pendingBrightness = {};  // channel → pct
   final Map<int, bool>   _pendingRelay      = {};  // channel → on
   final Map<int, int>    _pendingCurtain    = {};  // index   → 0/1/2 cmd
   final Map<String, bool> _pendingAppliance = {};  // gvl_name → on
+  final Map<String, bool> _pendingToggle    = {};  // var_name → on
   bool?   _pendingAlarm;     // null = not pending
   bool?   _pendingLockdown;
 
@@ -125,6 +140,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Map<int, bool>   get pendingRelay      => _pendingRelay;
   Map<int, int>    get pendingCurtain    => _pendingCurtain;
   Map<String, bool> get pendingAppliance => _pendingAppliance;
+  Map<String, bool> get pendingToggle    => _pendingToggle;
 
   // ── Constructor ────────────────────────────────────────────────────────────
 
@@ -193,6 +209,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _relayDevices       = [];
     _curtainDevices     = [];
     _applianceDevices   = [];
+    _toggleDevices      = [];
     _doorSensors        = [];
     _windowSensors      = [];
     _motionSensors      = [];
@@ -202,6 +219,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingRelay.clear();
     _pendingCurtain.clear();
     _pendingAppliance.clear();
+    _pendingToggle.clear();
     _pendingAlarm    = null;
     _pendingLockdown = null;
     _activeSceneIndex = null;
@@ -247,6 +265,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _pendingRelay.removeWhere((ch, on) => _state.relays[ch] == on);
         _pendingCurtain.removeWhere((idx, cmd) => _state.curtains[idx] == cmd);
         _pendingAppliance.removeWhere((name, on) => _state.appliances[name] == on);
+        _pendingToggle.removeWhere((name, on) => _state.toggles[name] == on);
         if (_pendingAlarm    != null && _state.security.armed    == _pendingAlarm!)    _pendingAlarm    = null;
         if (_pendingLockdown != null && _state.security.lockdown == _pendingLockdown!) _pendingLockdown = null;
       }
@@ -279,6 +298,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _applianceDevices = (data['appliances'] as List<dynamic>? ?? [])
         .map((e) => ApplianceDevice.fromJson(e as Map<String, dynamic>))
         .toList();
+    _toggleDevices = (data['toggles'] as List<dynamic>? ?? [])
+        .map((e) => ToggleDevice.fromJson(e as Map<String, dynamic>))
+        .toList();
     _doorSensors = (data['door_sensors'] as List<dynamic>? ?? [])
         .map((e) => SensorDevice.fromJson(e as Map<String, dynamic>, 'door'))
         .toList();
@@ -296,18 +318,25 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _initializedDevices = true;
     _addLog(
       'Loaded ${_daliDevices.length} lights, ${_relayDevices.length} relays, '
-      '${_curtainDevices.length} curtains, ${_applianceDevices.length} appliances',
+      '${_curtainDevices.length} curtains, ${_applianceDevices.length} appliances, '
+      '${_toggleDevices.length} toggles',
     );
   }
 
   // ── DALI actions ───────────────────────────────────────────────────────────
 
-  Future<void> setDaliBrightness(int channel, int pct) async {
+  /// durationMs fades server-side instead of jumping instantly — caller
+  /// picks dim vs. undim duration (they know the direction; AppState only
+  /// tracks brightness, not the user's speed preferences, which live on
+  /// AuthUser). Optimistic UI still updates immediately either way — the
+  /// fade is a hardware-visible transition, not something worth delaying
+  /// the on-screen slider position for.
+  Future<void> setDaliBrightness(int channel, int pct, {int durationMs = 0}) async {
     _pendingBrightness[channel] = pct;
     _activeSceneIndex           = null;
     notifyListeners();
 
-    final result = await _api.setDaliBrightness(channel, pct);
+    final result = await _api.setDaliBrightness(channel, pct, durationMs: durationMs);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Command failed';
       _addLog('Ch$channel: $msg', isError: true);
@@ -434,6 +463,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  // ── Toggle (named relay/light) actions ──────────────────────────────────────
+
+  Future<void> setToggle(String varName, bool on) async {
+    _pendingToggle[varName] = on;
+    notifyListeners();
+
+    final result = await _api.setToggle(varName, on);
+    if (!result.success) {
+      final msg = result.errorMessage ?? 'Command failed';
+      _addLog('$varName: $msg', isError: true);
+      _snackCtrl.add(SnackMsg.err(msg));
+      _pendingToggle.remove(varName);
+      notifyListeners();
+    } else {
+      _addLog('$varName → ${on ? "ON" : "OFF"}');
+    }
+  }
+
   // ── Security actions ───────────────────────────────────────────────────────
 
   Future<void> setAlarm(bool armed) async {
@@ -492,6 +539,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   bool effectiveAppliance(String gvlName) =>
       _pendingAppliance[gvlName] ?? _state.appliances[gvlName] ?? false;
+
+  bool effectiveToggle(String varName) =>
+      _pendingToggle[varName] ?? _state.toggles[varName] ?? false;
 
   bool get effectiveAlarmArmed =>
       _pendingAlarm ?? _state.security.armed;

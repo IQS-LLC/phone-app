@@ -9,6 +9,7 @@ Endpoints
   GET  /plc/diagnostics/                  detailed diagnostics
 
   POST /plc/dali/<ch>/brightness/         set single DALI channel
+                                            (optional duration_ms=100-5000 fades it)
   POST /plc/dali/all/brightness/          set all DALI channels
   POST /plc/room/<room>/brightness/       set all DALI channels in a room
 
@@ -18,6 +19,8 @@ Endpoints
   POST /plc/curtain/all/                  stop all curtains
 
   POST /plc/appliance/<gvl_name>/         set appliance relay (state=on|off)
+
+  POST /plc/toggle/<var_name>/            set named relay/light (state=on|off)
 
   GET  /plc/sensors/                      all sensor states (magnetic + motion)
   POST /plc/security/alarm/               arm/disarm (armed=true|false)
@@ -43,7 +46,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from .plc.registry import DeviceRegistry
-from .plc.devices import CurtainMotor
+from .plc.devices import CurtainMotor, DaliChannel
 from .permissions import log_action
 
 logger = logging.getLogger("lumina.api")
@@ -149,6 +152,24 @@ def _parse_brightness(post_data):
         return None, _err(f"brightness must be 0-100, got: {pct}", "INVALID_PARAM", 400)
     return pct, None
 
+def _parse_duration_ms(post_data):
+    """Optional — absent/0 means instant (existing behavior, unchanged).
+    Bounds match UserProfile.dim_duration_ms/undim_duration_ms's own
+    100-5000 range so a client can't bypass those by calling this endpoint
+    directly with an arbitrary value."""
+    raw = post_data.get("duration_ms")
+    if raw is None or raw == "":
+        return 0, None
+    try:
+        ms = int(raw)
+    except (TypeError, ValueError):
+        return None, _err(f"duration_ms must be an integer, got: {raw!r}", "INVALID_PARAM", 400)
+    if ms == 0:
+        return 0, None
+    if not 100 <= ms <= 5000:
+        return None, _err(f"duration_ms must be 0 or 100-5000, got: {ms}", "INVALID_PARAM", 400)
+    return ms, None
+
 def _parse_bool_param(post_data, param: str):
     raw = post_data.get(param, "").lower().strip()
     if not raw:
@@ -209,6 +230,8 @@ def get_devices(request):
         "curtains":       [d.to_dict() for d in r.all_curtains()],
         "switches":       [s.to_dict() for s in r.all_switches()],
         "appliances":     [a.to_dict() for a in r.all_appliances()],
+        "toggles":        [t.to_dict() for t in r.all_toggles()],
+        "named_switches": [s.to_dict() for s in r.all_named_switches()],
         "door_sensors":   [s.to_dict() for s in r.all_door_sensors()],
         "window_sensors": [s.to_dict() for s in r.all_window_sensors()],
         "motion_sensors": [s.to_dict() for s in r.all_motion_sensors()],
@@ -244,6 +267,8 @@ def get_diagnostics(request):
             "curtain_motors":  len(r.all_curtains()),
             "switch_inputs":   len(r.all_switches()),
             "appliances":      len(r.all_appliances()),
+            "toggles":         len(r.all_toggles()),
+            "named_switches":  len(r.all_named_switches()),
             "door_sensors":    len(r.all_door_sensors()),
             "window_sensors":  len(r.all_window_sensors()),
             "motion_sensors":  len(r.all_motion_sensors()),
@@ -278,10 +303,16 @@ def get_diagnostics(request):
 @csrf_exempt
 @require_POST
 def set_dali_brightness(request, channel: int):
-    if not 1 <= channel <= 28:
-        return _err(f"DALI channel must be 1-28, got {channel}", "INVALID_PARAM", 400)
+    if not 1 <= channel <= DaliChannel.MAX_CHANNEL:
+        return _err(
+            f"DALI channel must be 1-{DaliChannel.MAX_CHANNEL}, got {channel}",
+            "INVALID_PARAM", 400)
 
     pct, err = _parse_brightness(request.POST)
+    if err:
+        return err
+
+    duration_ms, err = _parse_duration_ms(request.POST)
     if err:
         return err
 
@@ -296,10 +327,15 @@ def set_dali_brightness(request, channel: int):
         return _err(f"DALI channel {channel} not configured", "NOT_FOUND", 404)
 
     try:
-        r.write_dali_brightness(channel, pct)
-        logger.info("DALI ch%d → %d%%", channel, pct)
-        log_action(request, "dali_brightness", channel=channel, brightness=pct)
-        return _ok({"channel": channel, "brightness": pct})
+        if duration_ms:
+            r.fade_dali(channel, pct, duration_ms)
+            logger.info("DALI ch%d → %d%% over %dms", channel, pct, duration_ms)
+            log_action(request, "dali_brightness", channel=channel, brightness=pct, duration_ms=duration_ms)
+        else:
+            r.write_dali_brightness(channel, pct)
+            logger.info("DALI ch%d → %d%%", channel, pct)
+            log_action(request, "dali_brightness", channel=channel, brightness=pct)
+        return _ok({"channel": channel, "brightness": pct, "duration_ms": duration_ms})
     except ConnectionError as exc:
         return _err(str(exc), "PLC_ERROR", 503)
     except Exception as exc:
@@ -532,6 +568,42 @@ def set_appliance(request, gvl_name: str):
         return _err(str(exc), "PLC_ERROR", 503)
     except Exception as exc:
         logger.exception("set_appliance %s", gvl_name)
+        return _err(str(exc), "SERVER_ERROR", 500)
+
+
+# ── Named relay/light (toggle) ────────────────────────────────────────────────
+
+@csrf_exempt
+@require_POST
+def set_toggle(request, var_name: str):
+    on, err = _parse_bool_param(request.POST, "state")
+    if err:
+        return err
+
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.toggle(var_name)
+    if dev is None:
+        return _err(
+            f"Device '{var_name}' not configured. "
+            f"Available: {list(r._toggles.keys())}",
+            "NOT_FOUND", 404)
+
+    try:
+        dev.set_state(on)
+        logger.info("Toggle %s → %s", var_name, "ON" if on else "OFF")
+        log_action(request, "toggle", var_name=var_name, on=on)
+        return _ok({"var_name": var_name, "on": on})
+    except ValueError as exc:
+        return _err(str(exc), "NOT_WRITABLE", 409)
+    except ConnectionError as exc:
+        return _err(str(exc), "PLC_ERROR", 503)
+    except Exception as exc:
+        logger.exception("set_toggle %s", var_name)
         return _err(str(exc), "SERVER_ERROR", 500)
 
 

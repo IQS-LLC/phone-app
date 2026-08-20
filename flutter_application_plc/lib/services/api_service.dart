@@ -212,11 +212,17 @@ class ApiService {
   Future<ApiResult<Map<String, dynamic>>> getDevices() =>
       _get('/plc/devices/', retry: false);
 
+  /// durationMs > 0 fades the channel over that time server-side instead of
+  /// jumping instantly. Bounded 100-5000 server-side regardless of what's
+  /// passed here — see find_device.views._parse_duration_ms.
   Future<ApiResult<Map<String, dynamic>>> setDaliBrightness(
-    int channel, int pct,
+    int channel, int pct, {int durationMs = 0}
   ) => _post(
     '/plc/dali/$channel/brightness/',
-    {'brightness': pct.toString()},
+    {
+      'brightness': pct.toString(),
+      if (durationMs > 0) 'duration_ms': durationMs.toString(),
+    },
   );
 
   Future<ApiResult<Map<String, dynamic>>> setAllDaliBrightness(int pct) =>
@@ -246,6 +252,12 @@ class ApiService {
   Future<ApiResult<Map<String, dynamic>>> setAppliance(
     String gvlName, bool on,
   ) => _post('/plc/appliance/$gvlName/', {'state': on ? 'true' : 'false'});
+
+  // ── Named relays/lights (ventilators, balcony/mirror/var lights, etc.) ──────
+
+  Future<ApiResult<Map<String, dynamic>>> setToggle(
+    String varName, bool on,
+  ) => _post('/plc/toggle/$varName/', {'state': on ? 'true' : 'false'});
 
   // ── Security ────────────────────────────────────────────────────────────────
 
