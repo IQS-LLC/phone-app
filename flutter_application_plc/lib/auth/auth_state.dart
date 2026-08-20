@@ -141,7 +141,6 @@ class AuthState extends ChangeNotifier {
   Future<bool> login({
     required String username,
     required String password,
-    required String serverUrl,
   }) async {
     _loading = true;
     _error   = null;
@@ -150,7 +149,6 @@ class AuthState extends ChangeNotifier {
     final result = await _svc.login(
       username: username,
       password: password,
-      baseUrl:  serverUrl,
     );
 
     if (result.success) {
@@ -175,7 +173,6 @@ class AuthState extends ChangeNotifier {
   Future<bool> register({
     required String username,
     required String password,
-    required String serverUrl,
     String email     = '',
     String firstName = '',
   }) async {
@@ -188,7 +185,6 @@ class AuthState extends ChangeNotifier {
       password:  password,
       email:     email,
       firstName: firstName,
-      baseUrl:   serverUrl,
     );
 
     if (result.success) {

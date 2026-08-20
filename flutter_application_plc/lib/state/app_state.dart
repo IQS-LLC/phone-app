@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
+import '../config/runtime_config.dart';
 import '../models/connectivity_status.dart';
 import '../models/device_state.dart';
 import '../models/models.dart';
@@ -44,11 +45,19 @@ ConnectionQuality _latencyToQuality(int? ms) {
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Config ─────────────────────────────────────────────────────────────────
-  String _baseUrl;
+  // AppState no longer owns its own copy of the server URL — it reads
+  // RuntimeConfig.serverUrl and reacts to _onConfigChanged whenever that
+  // value changes, instead of relying on some external caller to remember
+  // to push a new URL in by hand (the exact bug that shipped 2026-08-20:
+  // the tunnel-recovery flow updated RuntimeConfig's predecessor and
+  // AuthService's own copy, but nothing told AppState, so the dashboard
+  // kept polling the dead address after a successful login against the
+  // corrected one). See RuntimeConfig's doc comment for the full story.
+  final RuntimeConfig _config;
   final Future<String?> Function()? _getAuthToken;
   final Future<String?> Function()? _refreshAuthToken;
   late ApiService _api;
-  String get baseUrl => _baseUrl;
+  String get baseUrl => _config.serverUrl;
 
   // ── Connection ─────────────────────────────────────────────────────────────
   bool   _connected    = false;
@@ -141,6 +150,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   static const _fastInterval = Duration(seconds: 1);
 
   // ── Optimistic / pending updates ───────────────────────────────────────────
+  // Deliberately in-memory only — never persisted to disk. These represent
+  // "requested state" (the user tapped a switch, the write may or may not
+  // have reached the PLC yet), not "confirmed state" (what _state holds,
+  // straight from the server's own read of the hardware). If the app is
+  // killed mid-write, the process dies with these maps — there is nothing
+  // on disk claiming "the light is on" that could outlive the request that
+  // would have made it true. A fresh process starts with empty maps and a
+  // DeviceState.unknown/unavailable render for everything until the first
+  // real _poll() confirms actual state. Do NOT add persistence here: that
+  // would let a killed app resurrect an unconfirmed optimistic value as if
+  // it were physical truth on relaunch — exactly the failure mode kill-
+  // during-write testing (2026-08-20) exists to catch.
   final Map<int, int>    _pendingBrightness = {};  // channel → pct
   final Map<int, bool>   _pendingRelay      = {};  // channel → on
   final Map<int, int>    _pendingCurtain    = {};  // index   → 0/1/2 cmd
@@ -157,13 +178,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Constructor ────────────────────────────────────────────────────────────
 
-  AppState(this._baseUrl, {
+  AppState(this._config, {
     Future<String?> Function()? getAuthToken,
     Future<String?> Function()? refreshAuthToken,
   }) : _getAuthToken = getAuthToken, _refreshAuthToken = refreshAuthToken {
-    _api = ApiService(_baseUrl, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
-    _addLog('Connecting to $_baseUrl');
+    _rebuildForConfig(logConnecting: true);
     WidgetsBinding.instance.addObserver(this);
+    // The one and only place AppState learns the URL changed. Nothing else
+    // — not login, not Settings, not the recovery sheet — talks to AppState
+    // directly about the server URL anymore; they all just call
+    // RuntimeConfig.setServerUrl() and this fires as a consequence. That is
+    // the actual fix for "AppState kept polling the old URL": it is no
+    // longer possible for a URL change to happen without AppState hearing
+    // about it, because AppState is the one subscribing, not the one being
+    // remembered-to-be-told.
+    _config.addListener(_onConfigChanged);
     _poll();
     _poller = Timer.periodic(_fastInterval, (_) {
       if (_paused) return;
@@ -183,6 +212,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _config.removeListener(_onConfigChanged);
     WidgetsBinding.instance.removeObserver(this);
     _poller?.cancel();
     _snackCtrl.close();
@@ -207,11 +237,32 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   // ── Server URL change ──────────────────────────────────────────────────────
+  //
+  // RuntimeConfig is the only writer of the server URL. AppState only ever
+  // reacts — see the constructor's _config.addListener(_onConfigChanged).
 
-  void setBaseUrl(String url) {
-    if (url == _baseUrl) return;
-    _baseUrl            = url;
-    _api                = ApiService(url, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
+  void _onConfigChanged() {
+    final wasUrl = _api.baseUrl;
+    _rebuildForConfig(logConnecting: false);
+    _addLog('Server changed → ${_config.serverUrl}  (config v${_config.version}, was $wasUrl)');
+    notifyListeners();
+    _poll();
+  }
+
+  /// (Re)builds the ApiService for the current RuntimeConfig value and
+  /// resets every piece of state that belongs to "the old server" — device
+  /// lists, pending optimistic writes, connectivity status. Called once
+  /// from the constructor and again every time [_onConfigChanged] fires.
+  ///
+  /// Also resets [_polling] to false: a request against the *old* API
+  /// instance may still be in flight when this runs. That request is not
+  /// cancelled (Dart's http package has no cheap cancellation here), but
+  /// _poll()'s own version check discards its result when it eventually
+  /// resolves, and resetting the gate here means the discard doesn't also
+  /// block the fresh poll this method triggers from ever starting.
+  void _rebuildForConfig({required bool logConnecting}) {
+    _api = ApiService(_config.serverUrl, tokenProvider: _getAuthToken, tokenRefresher: _refreshAuthToken);
+    _polling            = false;
     _connected          = false;
     _connecting         = true;
     _connectivityStatus = ConnectivityStatus.connecting;
@@ -238,9 +289,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingAlarm    = null;
     _pendingLockdown = null;
     _activeSceneIndex = null;
-    _addLog('Server changed → $url');
-    notifyListeners();
-    _poll();
+    if (logConnecting) _addLog('Connecting to ${_config.serverUrl}');
   }
 
   // ── Manual refresh ─────────────────────────────────────────────────────────
@@ -255,8 +304,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _poll() async {
     if (_polling) return;
     _polling = true;
+    // Captured before the await — if RuntimeConfig changes while this
+    // request is in flight, _config.version will have moved on by the time
+    // it resolves. That response belongs to a server the user has already
+    // switched away from and must never be applied, or a slow response
+    // from the OLD server could silently overwrite state the NEW server
+    // already reported. See RuntimeConfig's doc comment and Scenario C/F
+    // in the 2026-08-20 hardening pass.
+    final requestVersion = _config.version;
     try {
       final result       = await _api.getState();
+      if (requestVersion != _config.version) {
+        // Stale — a newer config change superseded this request while it
+        // was in flight. _rebuildForConfig() already reset _polling and
+        // kicked off a fresh, current poll; this one has nothing left to
+        // do and must not touch _connected/_state/_polling.
+        return;
+      }
       final wasConnected = _connected;
       final prevStatus    = _connectivityStatus;
       _connecting        = false;
@@ -312,7 +376,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
       notifyListeners();
     } finally {
-      _polling = false;
+      // Only release the gate if this is still the current config
+      // generation. If a config change happened mid-request, _rebuildForConfig
+      // already reset _polling (and a fresh poll may already be running
+      // under it) — this stale request must not stomp on that.
+      if (requestVersion == _config.version) _polling = false;
     }
   }
 
@@ -356,7 +424,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _loadDevices() async {
+    final requestVersion = _config.version;
     final result = await _api.getDevices();
+    // Same stale-response guard as _poll() — a slow device-list fetch
+    // against the old server must not populate the room grid with the old
+    // apartment's devices after the user has already switched servers.
+    if (requestVersion != _config.version) return;
     if (!result.success || result.data == null) {
       _addLog('Failed to load device list', isError: true);
       return;

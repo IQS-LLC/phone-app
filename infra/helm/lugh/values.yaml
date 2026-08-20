@@ -17,7 +17,15 @@ django:
   image:
     repository: lugh-django
     pullPolicy: Always
-  replicas: 2
+  # Must stay 1. DeviceRegistry holds each apartment's ADS connection to the
+  # PLC in-process memory — a second replica (or WEB_CONCURRENCY above 1,
+  # see below) gets its own independent DeviceRegistry competing for the
+  # same PLC's limited AMS route slots. This is not theoretical: it caused
+  # a real ~25-minute outage during 2026-08-20 QA when two separate
+  # processes each opened their own registry against the same apartment.
+  # See CLAUDE.md's "Critical Architecture Constraints" and
+  # values-server.yaml, which already gets this right.
+  replicas: 1
   port: 8000
 
   resources:
@@ -39,8 +47,8 @@ django:
     PLC_PORT: "851"
     # Redis
     REDIS_URL: "redis://redis:6379/0"
-    # Gunicorn
-    WEB_CONCURRENCY: "4"
+    # Gunicorn — must stay 1, same reason replicas above must stay 1.
+    WEB_CONCURRENCY: "1"
 
   # Secrets (values injected from K8s Secret)
   secretRef: lugh-secrets

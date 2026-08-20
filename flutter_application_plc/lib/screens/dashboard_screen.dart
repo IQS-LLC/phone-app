@@ -8,6 +8,7 @@ import '../models/device_state.dart';
 import '../models/models.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
+import '../utils/apartment_display.dart';
 import '../utils/room_display.dart';
 import '../widgets/common_widgets.dart';
 
@@ -451,13 +452,7 @@ class _HeroBanner extends StatelessWidget {
                   Row(children: [
                     Icon(timeIcon, color: C.accent.withAlpha(150), size: 12),
                     const SizedBox(width: 6),
-                    // Never fall back to the raw numeric aptId as a display
-                    // name — found live 2026-08-20: apartment PKs and real
-                    // apartment names collide in this dataset (PK 1 is named
-                    // "Apartment 16"), so "Apartment $aptId" during the brief
-                    // pre-load window looks exactly like a real, WRONG
-                    // apartment name instead of an obvious placeholder.
-                    Text(apartmentName ?? 'Loading…',
+                    Text(ApartmentDisplay.label(apartmentName),
                         style: AppText.small.copyWith(color: C.textSec)),
                   ]),
                   const SizedBox(height: 10),

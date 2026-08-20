@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 
 import 'auth/auth_service.dart';
 import 'auth/auth_state.dart';
-import 'config.dart';
+import 'config/runtime_config.dart';
 import 'state/app_state.dart';
 import 'theme.dart';
 import 'screens/login_screen.dart';
@@ -27,12 +27,16 @@ void main() async {
     DeviceOrientation.landscapeRight,
   ]);
 
-  final url = await AppConfig.resolve();
+  // Single authoritative source of the server URL — must be ready before
+  // AuthService or AppState are constructed, since both read it. See
+  // RuntimeConfig's doc comment for why this replaced three independent
+  // copies of the same value.
+  await RuntimeConfig.instance.initialize();
 
   final authService = AuthService();
   final authState   = AuthState(authService);
   final appState    = AppState(
-    url,
+    RuntimeConfig.instance,
     getAuthToken:     authService.getAccessToken,
     refreshAuthToken: authService.refreshAccessToken,
   );
@@ -92,7 +96,10 @@ class _AuthGate extends StatelessWidget {
 
         // Not logged in — show login
         if (!authState.isAuth) {
-          return LoginScreen(authState: authState, appState: appState);
+          // LoginScreen no longer needs an AppState reference — a login
+          // that recovers the server URL now flows entirely through
+          // RuntimeConfig, which AppState is subscribed to directly.
+          return LoginScreen(authState: authState);
         }
 
         // Authenticated — show dashboard. AppState's server URL comes only

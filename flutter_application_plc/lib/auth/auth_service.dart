@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import '../config/runtime_config.dart';
 import '../models/auth_models.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13,7 +14,6 @@ import '../models/auth_models.dart';
 
 const _kAccess   = 'lumina_access_token';
 const _kRefresh  = 'lumina_refresh_token';
-const _kBaseUrl  = 'lumina_auth_base_url';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AuthResult
@@ -51,20 +51,17 @@ class AuthService {
 
   static const _timeout = Duration(seconds: 10);
 
-  // Base URL of the Django backend (e.g. "http://192.168.0.158:8000")
-  String? _baseUrl;
+  final RuntimeConfig _config;
 
-  Future<String?> get _resolvedBase async {
-    _baseUrl ??= await _storage.read(key: _kBaseUrl);
-    return _baseUrl;
-  }
+  /// [config] defaults to the app-wide singleton — every real call site
+  /// gets it for free; the parameter exists mainly for tests.
+  AuthService([RuntimeConfig? config]) : _config = config ?? RuntimeConfig.instance;
 
-  // ── Configuration ──────────────────────────────────────────────────────────
-
-  Future<void> configure(String baseUrl) async {
-    _baseUrl = baseUrl.trimRight().replaceAll(RegExp(r'/+$'), '');
-    await _storage.write(key: _kBaseUrl, value: _baseUrl);
-  }
+  // Server URL comes from RuntimeConfig on every call, never cached here —
+  // AuthService used to keep its own persisted copy, which is exactly the
+  // duplicated-state class of bug this session hardened against. See
+  // RuntimeConfig's doc comment for the full story.
+  String get _base => _config.serverUrl;
 
   // ── Token helpers ──────────────────────────────────────────────────────────
 
@@ -90,13 +87,8 @@ class AuthService {
     required String password,
     String email     = '',
     String firstName = '',
-    String baseUrl   = '',
   }) async {
-    if (baseUrl.isNotEmpty) await configure(baseUrl);
-    final base = await _resolvedBase;
-    if (base == null) return AuthResult.err('Server URL not configured');
-
-    return _post('$base/auth/register/', {
+    return _post('$_base/auth/register/', {
       'username':   username,
       'password':   password,
       if (email.isNotEmpty)     'email':      email,
@@ -109,13 +101,8 @@ class AuthService {
   Future<AuthResult> login({
     required String username,
     required String password,
-    String baseUrl = '',
   }) async {
-    if (baseUrl.isNotEmpty) await configure(baseUrl);
-    final base = await _resolvedBase;
-    if (base == null) return AuthResult.err('Server URL not configured');
-
-    return _post('$base/auth/login/', {
+    return _post('$_base/auth/login/', {
       'username': username,
       'password': password,
     });
@@ -129,12 +116,9 @@ class AuthService {
     final refresh = await getRefreshToken();
     if (refresh == null) return null;
 
-    final base = await _resolvedBase;
-    if (base == null) return null;
-
     try {
       final response = await http.post(
-        Uri.parse('$base/auth/refresh/'),
+        Uri.parse('$_base/auth/refresh/'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'refresh': refresh}),
       ).timeout(_timeout);
@@ -155,14 +139,13 @@ class AuthService {
   // ── Logout ─────────────────────────────────────────────────────────────────
 
   Future<void> logout() async {
-    final base    = await _resolvedBase;
     final refresh = await getRefreshToken();
     final access  = await getAccessToken();
 
-    if (base != null && refresh != null && access != null) {
+    if (refresh != null && access != null) {
       try {
         await http.post(
-          Uri.parse('$base/auth/logout/'),
+          Uri.parse('$_base/auth/logout/'),
           headers: {
             'Content-Type':  'application/json',
             'Authorization': 'Bearer $access',
@@ -178,13 +161,12 @@ class AuthService {
   // ── Me ─────────────────────────────────────────────────────────────────────
 
   Future<AuthUser?> fetchMe() async {
-    final base   = await _resolvedBase;
     final access = await getAccessToken();
-    if (base == null || access == null) return null;
+    if (access == null) return null;
 
     try {
       final response = await http.get(
-        Uri.parse('$base/auth/me/'),
+        Uri.parse('$_base/auth/me/'),
         headers: {'Authorization': 'Bearer $access'},
       ).timeout(_timeout);
 
@@ -200,7 +182,7 @@ class AuthService {
         final newAccess = await refreshAccessToken();
         if (newAccess != null) {
           final retry = await http.get(
-            Uri.parse('$base/auth/me/'),
+            Uri.parse('$_base/auth/me/'),
             headers: {'Authorization': 'Bearer $newAccess'},
           ).timeout(_timeout);
           if (retry.statusCode == 200) {
@@ -271,5 +253,9 @@ class AuthService {
 
   // ── Base URL accessor ──────────────────────────────────────────────────────
 
-  Future<String?> getBaseUrl() async => _resolvedBase;
+  // Returns Future<String?> (rather than a sync String) purely for source
+  // compatibility with the ~10 screens that already `await svc.getBaseUrl()`
+  // — the value itself is never cached or stale here, it's read straight
+  // from RuntimeConfig on every call.
+  Future<String?> getBaseUrl() async => _base;
 }

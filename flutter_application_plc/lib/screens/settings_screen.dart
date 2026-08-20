@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../theme.dart';
-import '../config.dart';
+import '../config/runtime_config.dart';
 import '../models/connectivity_status.dart';
 import '../state/app_state.dart';
 import '../auth/auth_state.dart';
+import '../utils/apartment_display.dart';
 import '../widgets/common_widgets.dart';
 import 'connection_screen.dart';
 import 'dynamic_dashboard_screen.dart';
@@ -74,22 +75,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _saveUrl() async {
-    final url = _urlCtrl.text.trim().replaceAll(RegExp(r'/+$'), '');
-    if (url.isEmpty) return;
-    final uri = Uri.tryParse(url);
-    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-      AppToast.show(context, 'Enter a valid URL, e.g. http://192.168.0.158:8000', error: true);
+    setState(() => _savingUrl = true);
+    // One call: validates, persists, updates the in-memory value, and
+    // notifies AppState (which is subscribed directly) to rebuild its API
+    // client and reconnect. Nothing else needs telling separately anymore —
+    // AuthService reads RuntimeConfig fresh on every request too.
+    final error = await RuntimeConfig.instance.setServerUrl(_urlCtrl.text);
+    if (!mounted) return;
+    if (error != null) {
+      setState(() => _savingUrl = false);
+      AppToast.show(context, error, error: true);
       return;
     }
-    setState(() => _savingUrl = true);
-    widget.appState.setBaseUrl(url);
-    await widget.authState?.service.configure(url);
-    await AppConfig.persist(url);
     await widget.appState.refresh();
     if (!mounted) return;
     setState(() => _savingUrl = false);
     AppToast.show(context,
-        widget.appState.connected ? 'Connected to $url' : 'Saved — couldn\'t reach $url',
+        widget.appState.connected
+            ? 'Connected to ${RuntimeConfig.instance.serverUrl}'
+            : 'Saved — couldn\'t reach the server',
         error: !widget.appState.connected);
   }
 
@@ -382,7 +386,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const SizedBox(width: 14),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(name ?? 'Apartment', style: AppText.cardTitle),
+                Text(ApartmentDisplay.label(name), style: AppText.cardTitle),
                 Text('Your assigned residence', style: AppText.caption),
               ]),
             ),
@@ -682,7 +686,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               builder: (_) => LightReconfigureScreen(
                 authState: widget.authState!,
                 apartmentId: widget.authState!.apartmentId!,
-                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+                apartmentName: ApartmentDisplay.label(widget.authState!.apartmentName),
               ),
             )),
           ),
@@ -695,7 +699,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               builder: (_) => InputIdentifyScreen(
                 authState: widget.authState!,
                 apartmentId: widget.authState!.apartmentId!,
-                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+                apartmentName: ApartmentDisplay.label(widget.authState!.apartmentName),
               ),
             )),
           ),
@@ -708,7 +712,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               builder: (_) => AutomationsScreen(
                 authState: widget.authState!,
                 apartmentId: widget.authState!.apartmentId!,
-                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+                apartmentName: ApartmentDisplay.label(widget.authState!.apartmentName),
               ),
             )),
           ),
@@ -721,7 +725,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               builder: (_) => SuperscanScreen(
                 authState: widget.authState!,
                 apartmentId: widget.authState!.apartmentId!,
-                apartmentName: widget.authState!.apartmentName ?? 'Apartment',
+                apartmentName: ApartmentDisplay.label(widget.authState!.apartmentName),
               ),
             )),
           ),

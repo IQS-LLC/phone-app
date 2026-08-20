@@ -3,8 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
-import '../config.dart';
-import '../state/app_state.dart';
+import '../config/runtime_config.dart';
 import '../theme.dart';
 import '../widgets/common_widgets.dart';
 
@@ -14,8 +13,7 @@ import '../widgets/common_widgets.dart';
 
 class LoginScreen extends StatefulWidget {
   final AuthState authState;
-  final AppState  appState;
-  const LoginScreen({super.key, required this.authState, required this.appState});
+  const LoginScreen({super.key, required this.authState});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -54,28 +52,23 @@ class _LoginScreenState extends State<LoginScreen>
   Future<void> _submit() async {
     _auth.clearError();
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    final serverUrl = await AppConfig.resolve();
+    // AuthService reads RuntimeConfig.serverUrl internally on every call —
+    // login no longer needs to resolve or pass a URL itself, and AppState
+    // no longer needs a manual nudge afterward: it's subscribed to
+    // RuntimeConfig directly, so if the Advanced sheet below just recovered
+    // from a dead tunnel URL, AppState already knows before this call even
+    // returns.
     final ok = await _auth.login(
-      username:  _userCtrl.text.trim(),
-      password:  _passCtrl.text,
-      serverUrl: serverUrl,
+      username: _userCtrl.text.trim(),
+      password: _passCtrl.text,
     );
-    if (ok) {
-      // AppState is constructed once at cold start with whatever URL was
-      // resolved then. If the user just recovered from a dead tunnel via
-      // the Advanced sheet below, that's a different (newer) URL than the
-      // one AppState has been polling with — without this, login succeeds
-      // but the dashboard keeps silently polling the old dead address
-      // forever. setBaseUrl() is a no-op when the URL hasn't changed.
-      widget.appState.setBaseUrl(serverUrl);
-    } else if (mounted) {
+    if (!ok && mounted) {
       AppToast.show(context, _auth.error ?? 'Login failed', error: true);
     }
   }
 
   Future<void> _openServerAddressSheet(BuildContext context) async {
-    final currentUrl = await AppConfig.resolve();
-    if (!context.mounted) return;
+    final currentUrl = RuntimeConfig.instance.serverUrl;
     final saved = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -371,6 +364,7 @@ class _ServerAddressSheet extends StatefulWidget {
 class _ServerAddressSheetState extends State<_ServerAddressSheet> {
   late final TextEditingController _ctrl = TextEditingController(text: widget.currentUrl);
   bool _saving = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -379,11 +373,18 @@ class _ServerAddressSheetState extends State<_ServerAddressSheet> {
   }
 
   Future<void> _save() async {
-    final url = _ctrl.text.trim();
-    if (url.isEmpty) return;
-    setState(() => _saving = true);
-    await AppConfig.persist(url);
-    if (mounted) Navigator.pop(context, true);
+    setState(() { _saving = true; _error = null; });
+    // RuntimeConfig.setServerUrl validates, persists, updates the
+    // in-memory value, and notifies every subscriber (AppState chief among
+    // them) as one step — see its doc comment. Nothing else needs to be
+    // told separately; there is nothing else left holding its own copy.
+    final error = await RuntimeConfig.instance.setServerUrl(_ctrl.text);
+    if (!mounted) return;
+    if (error != null) {
+      setState(() { _saving = false; _error = error; });
+      return;
+    }
+    Navigator.pop(context, true);
   }
 
   @override
@@ -436,6 +437,10 @@ class _ServerAddressSheetState extends State<_ServerAddressSheet> {
             focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: C.accent, width: 1.5)),
           ),
         ),
+        if (_error != null) ...[
+          const SizedBox(height: 8),
+          Text(_error!, style: AppText.bodySm.copyWith(color: C.red)),
+        ],
         const SizedBox(height: 18),
         PrimaryButton(label: 'Save & Retry Sign In', loading: _saving, onTap: _save),
         const SizedBox(height: 8),

@@ -298,6 +298,40 @@ def get_diagnostics(request):
         return _err(str(exc), "SERVER_ERROR", 500)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Write commands (DALI/relay/curtain/appliance/toggle/security below)
+#
+# Concurrent-write semantics — documented, not accidental:
+#
+# Two requests can arrive for the same device at nearly the same instant
+# (two residents, a manual toggle racing an automation, SuperScan testing
+# while polling continues). What makes the outcome deterministic rather
+# than a timing accident:
+#
+#   1. WEB_CONCURRENCY=1 (Dockerfile, docker-compose.prod.yml) — exactly one
+#      Gunicorn worker process handles every request, one at a time. Two
+#      requests never execute their view functions truly in parallel; the
+#      second one's view function only starts once the first has returned.
+#   2. ADSClient.write_*() takes self._lock (an RLock) around the actual PLC
+#      write, so even if that guarantee ever changed, the hardware write
+#      itself is still serialized per-connection.
+#
+# The result: "requested state" (what a client asked for) always resolves
+# to whatever request's write reaches the PLC LAST, in arrival order — not
+# a race with an unpredictable winner. "Confirmed state" is whatever the
+# next GET /plc/state/ reads back from the hardware itself, independent of
+# which client asked for what; no client's local guess is ever treated as
+# authoritative. Verified live 2026-08-20: two parallel opposite commands
+# to the same relay (ON/OFF, ~100ms apart) both returned 200, and the
+# channel settled to the later-arriving request's value with no corruption,
+# no duplicate command, and no stuck state.
+#
+# This determinism depends on staying at one worker / one replica — see the
+# warning on WEB_CONCURRENCY in infra/helm/lugh/values.yaml and CLAUDE.md's
+# "Critical Architecture Constraints" before ever changing it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 # ── DALI — single channel ─────────────────────────────────────────────────────
 
 @csrf_exempt
