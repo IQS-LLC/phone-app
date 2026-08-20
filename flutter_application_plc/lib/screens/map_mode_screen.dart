@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/map_models.dart';
 import '../models/models.dart';
 import '../services/map_service.dart';
@@ -209,7 +210,11 @@ class _MapModeScreenState extends State<MapModeScreen>
   bool _noMap      = false;
 
   // ── Background image ─────────────────────────────────────────────────────────
-  String    _baseUrl     = '';
+  // Read live, not cached — a field set once from an async resolution at
+  // init time would keep building image URLs against the old server for as
+  // long as this screen stays mounted after a URL change, same class of
+  // bug as the service-caching one RuntimeConfig's doc comment describes.
+  String    get _baseUrl => RuntimeConfig.instance.serverUrl;
   ui.Image? _bgImage;
   String    _bgImageUrl  = '';
 
@@ -246,13 +251,11 @@ class _MapModeScreenState extends State<MapModeScreen>
     _glowAnim  = Tween<double>(begin: 0.2, end: 0.9).animate(
         CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut));
     _st.addListener(_onStateChanged);
+    // _loadLayout() below already triggers _loadBgImage() itself once the
+    // layout arrives — no separate wait-for-baseUrl step needed now that
+    // _baseUrl reads RuntimeConfig synchronously instead of being resolved
+    // once and cached.
     _loadLayout();
-    _svc.getBaseUrl().then((url) {
-      if (!mounted) return;
-      setState(() { _baseUrl = url ?? ''; });
-      final bgUrl = _editorLayout?.backgroundUrl ?? '';
-      if (bgUrl.isNotEmpty && _bgImage == null) _loadBgImage(bgUrl);
-    });
   }
 
   Future<void> _loadLayout() async {

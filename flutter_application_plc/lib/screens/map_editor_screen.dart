@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../auth/auth_state.dart';
+import '../config/runtime_config.dart';
 import '../models/map_models.dart';
 import '../services/map_service.dart';
 import '../theme.dart';
@@ -178,7 +179,8 @@ class _MapEditorState extends State<MapEditorScreen> {
   bool _dirty   = false;
 
   // ── Background image ─────────────────────────────────────────────────────────
-  String    _baseUrl     = '';
+  // Read live, not cached — see the identical comment in map_mode_screen.dart.
+  String    get _baseUrl => RuntimeConfig.instance.serverUrl;
   bool      _uploadingBg = false;
   ui.Image? _bgImage;
   String    _bgImageUrl  = '';
@@ -193,13 +195,10 @@ class _MapEditorState extends State<MapEditorScreen> {
       getToken:   widget.authState.service.getAccessToken,
       getBaseUrl: widget.authState.service.getBaseUrl,
     );
+    // _loadApartments() (and whatever loads _layout after it) already
+    // triggers _loadBgImage() itself once a layout arrives — no separate
+    // wait-for-baseUrl step needed now that _baseUrl is a synchronous read.
     _loadApartments();
-    _svc.getBaseUrl().then((url) {
-      if (!mounted) return;
-      setState(() { _baseUrl = url ?? ''; });
-      final bgUrl = _layout?.backgroundUrl ?? '';
-      if (bgUrl.isNotEmpty && _bgImage == null) _loadBgImage(bgUrl);
-    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
