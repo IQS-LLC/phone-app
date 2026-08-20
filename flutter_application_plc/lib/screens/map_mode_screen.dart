@@ -512,7 +512,10 @@ class _MapModeScreenState extends State<MapModeScreen>
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(children: [
                 _TopBadge(
-                  label: widget.apartmentLabel ?? 'Apartment ${_st.state.apartmentId}',
+                  // Same principle as the dashboard hero banner: never
+                  // synthesize a display name from the raw apartment PK —
+                  // it can collide with a real (wrong) apartment's name.
+                  label: widget.apartmentLabel ?? 'Loading…',
                   dot: _st.connected ? C.green : C.red,
                 ),
                 if (_selectedRoom != null) ...[
@@ -602,7 +605,10 @@ class _MapModeScreenState extends State<MapModeScreen>
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(children: [
                 _TopBadge(
-                  label: widget.apartmentLabel ?? 'Apartment ${_st.state.apartmentId}',
+                  // Same principle as the dashboard hero banner: never
+                  // synthesize a display name from the raw apartment PK —
+                  // it can collide with a real (wrong) apartment's name.
+                  label: widget.apartmentLabel ?? 'Loading…',
                   dot: _st.connected ? C.green : C.red,
                 ),
                 const Spacer(),

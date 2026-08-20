@@ -82,9 +82,11 @@ class _MainShellState extends State<MainShell> {
             appState:       widget.appState,
             authState:      widget.authState,
             onClose:        _closeMap,
-            apartmentLabel: widget.authState.apartmentName != null
-                ? 'Apartment ${widget.authState.apartmentName}'
-                : null,
+            // authState.apartmentName is already the full display name
+            // (e.g. "Apartment 16") — found live 2026-08-20 that prepending
+            // "Apartment " here produced "Apartment Apartment 16" on the
+            // Map Mode top badge.
+            apartmentLabel: widget.authState.apartmentName,
           ),
         ),
 

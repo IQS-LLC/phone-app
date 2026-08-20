@@ -232,7 +232,6 @@ class _DashboardScreenState extends State<DashboardScreen>
                     bgColors:    _timeColors(),
                     timeIcon:    _timeIcon(),
                     totalOn:     totalOn,
-                    aptId:       _st.state.apartmentId,
                     apartmentName: widget.authState.apartmentName,
                     breatheAnim: _breatheAnim,
                     appState:    _st,
@@ -384,14 +383,13 @@ class _HeroBanner extends StatelessWidget {
   final List<Color> bgColors;
   final IconData    timeIcon;
   final int         totalOn;
-  final int         aptId;
   final String?     apartmentName;
   final Animation<double> breatheAnim;
   final AppState    appState;
 
   const _HeroBanner({
     required this.greeting, required this.bgColors, required this.timeIcon,
-    required this.totalOn,  required this.aptId,    required this.breatheAnim,
+    required this.totalOn,  required this.breatheAnim,
     required this.appState, this.apartmentName,
   });
 
@@ -453,7 +451,13 @@ class _HeroBanner extends StatelessWidget {
                   Row(children: [
                     Icon(timeIcon, color: C.accent.withAlpha(150), size: 12),
                     const SizedBox(width: 6),
-                    Text(apartmentName ?? 'Apartment $aptId',
+                    // Never fall back to the raw numeric aptId as a display
+                    // name — found live 2026-08-20: apartment PKs and real
+                    // apartment names collide in this dataset (PK 1 is named
+                    // "Apartment 16"), so "Apartment $aptId" during the brief
+                    // pre-load window looks exactly like a real, WRONG
+                    // apartment name instead of an obvious placeholder.
+                    Text(apartmentName ?? 'Loading…',
                         style: AppText.small.copyWith(color: C.textSec)),
                   ]),
                   const SizedBox(height: 10),
