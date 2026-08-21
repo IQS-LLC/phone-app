@@ -86,6 +86,14 @@ $Cfg = @{
     # Tunnel
     CloudflaredExe   = if ($env:CLOUDFLARED_EXE)   { $env:CLOUDFLARED_EXE }   else { "C:\Users\Automation\Desktop\cloudflared.exe" }
     TunnelPort       = if ($env:TUNNEL_PORT)        { $env:TUNNEL_PORT }       else { "8090" }
+    # How many concurrent quick tunnels to run — temporary multi-endpoint
+    # failover bridge (2026-08-21) until the server has real WAN
+    # connectivity, so a single dead/slow/edge-throttled Cloudflare tunnel
+    # can't take the app down. All N point at the SAME local backend
+    # (TunnelPort) and get independent trycloudflare.com hostnames; the
+    # Flutter-side RuntimeConfig endpoint pool (lib/config/runtime_config.dart)
+    # health-checks and fails over between whichever of these are up.
+    TunnelCount      = if ($env:TUNNEL_COUNT)       { [int]$env:TUNNEL_COUNT } else { 3 }
 
     # GitHub
     GithubRepo       = if ($env:GITHUB_REPO)        { $env:GITHUB_REPO }       else { "IQS-LLC/phone-app" }
@@ -122,15 +130,21 @@ $Cfg = @{
 $Script:Version    = "1.0.0"
 $Script:StartTime  = Get-Date
 $Script:RunTs      = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+# TunnelUrl stays a single string — the *first* successfully captured URL —
+# for backward compatibility with the manifest/Helm/summary display below,
+# which only ever showed one. TunnelUrls (plural) is the real list the
+# multi-endpoint failover pool actually needs; it's what gets pushed to the
+# GitHub secret.
 $Script:TunnelUrl  = ""
+$Script:TunnelUrls = @()
 $Script:CIRunId    = ""
 $Script:CIStatus   = ""
-$Script:CfProc     = $null
+$Script:CfProcs    = @()
+$Script:CfLogFiles = @()
 
 [void](New-Item -ItemType Directory -Force -Path $Cfg.LogDir, $Cfg.ArtifactsDir)
 
 $Script:LogFile   = Join-Path $Cfg.LogDir "gogogo222-$($Script:RunTs).log"
-$Script:CfLogFile = Join-Path $Cfg.LogDir "cloudflared-$($Script:RunTs).log"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -189,9 +203,11 @@ function Stop-WithError {
     param([string]$Message)
     Write-LError $Message
     Write-LError "Full log: $($Script:LogFile)"
-    # Kill cloudflared if running
-    if ($Script:CfProc -and -not $Script:CfProc.HasExited) {
-        $Script:CfProc | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Kill every cloudflared tunnel process we started
+    foreach ($p in $Script:CfProcs) {
+        if ($p -and -not $p.HasExited) {
+            $p | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
     }
     exit 1
 }
@@ -382,60 +398,85 @@ function Step-NginxReload {
 # ─────────────────────────────────────────────────────────────────────────────
 
 function Step-Tunnel {
-    Write-Step "STEP 6 / CLOUDFLARE QUICK TUNNEL"
+    Write-Step "STEP 6 / CLOUDFLARE QUICK TUNNELS ($($Cfg.TunnelCount)x, failover pool)"
 
     if (-not (Test-Path $Cfg.CloudflaredExe)) {
         Write-LWarn "cloudflared not found — skipping (local only at http://localhost:$($Cfg.TunnelPort))"
         return
     }
 
-    # Kill any existing cloudflared instance
+    # Kill any existing cloudflared instances — every prior run's tunnels,
+    # not just one, since this now launches a pool.
     Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 
-    if (Test-Path $Script:CfLogFile) { Remove-Item $Script:CfLogFile -Force }
+    $Script:CfProcs    = @()
+    $Script:CfLogFiles = @()
 
-    Write-L "Starting cloudflared tunnel → http://localhost:$($Cfg.TunnelPort)"
+    # All N processes proxy the SAME local backend — each just gets its own
+    # independent trycloudflare.com hostname from Cloudflare's edge. This is
+    # what makes the pool a real failover set rather than N copies of one
+    # endpoint: if any one tunnel process dies or its hostname gets
+    # throttled, the others are unaffected.
+    for ($i = 1; $i -le $Cfg.TunnelCount; $i++) {
+        $logFile = Join-Path $Cfg.LogDir "cloudflared-$($Script:RunTs)-$i.log"
+        if (Test-Path $logFile) { Remove-Item $logFile -Force }
 
-    $Script:CfProc = Start-Process `
-        -FilePath       $Cfg.CloudflaredExe `
-        -ArgumentList   "tunnel --url http://localhost:$($Cfg.TunnelPort)" `
-        -RedirectStandardError $Script:CfLogFile `
-        -NoNewWindow `
-        -PassThru
+        Write-L "Starting cloudflared tunnel $i/$($Cfg.TunnelCount) → http://localhost:$($Cfg.TunnelPort)"
+        $proc = Start-Process `
+            -FilePath       $Cfg.CloudflaredExe `
+            -ArgumentList   "tunnel --url http://localhost:$($Cfg.TunnelPort)" `
+            -RedirectStandardError $logFile `
+            -NoNewWindow `
+            -PassThru
 
-    $Script:CfProc.Id |
+        $Script:CfProcs    += $proc
+        $Script:CfLogFiles += $logFile
+        Write-LData "  PID: $($proc.Id) | log: $logFile"
+    }
+    ($Script:CfProcs | ForEach-Object { $_.Id }) -join "`n" |
         Out-File -FilePath (Join-Path $Cfg.LogDir "cloudflared.pid") -Encoding ASCII
 
-    Write-LData "PID: $($Script:CfProc.Id) | log: $($Script:CfLogFile)"
-
-    # Poll log until URL appears
+    # Poll every log until each has produced a URL, or the timeout hits —
+    # partial success is fine (a 2-of-3 pool still fails over fine), so this
+    # doesn't retry or fail the whole step over one slow/dead process.
     $deadline = [datetime]::Now.AddSeconds($Cfg.WaitTunnel)
-    $found    = $false
+    $Script:TunnelUrls = @()
+    $pending = 0..($Script:CfLogFiles.Count - 1)
 
-    while ([datetime]::Now -lt $deadline) {
+    while ([datetime]::Now -lt $deadline -and $pending.Count -gt 0) {
         Start-Sleep -Seconds 2
-        if (Test-Path $Script:CfLogFile) {
-            $content = Get-Content $Script:CfLogFile -Raw -ErrorAction SilentlyContinue
+        $stillPending = @()
+        foreach ($idx in $pending) {
+            $logFile = $Script:CfLogFiles[$idx]
+            $content = if (Test-Path $logFile) { Get-Content $logFile -Raw -ErrorAction SilentlyContinue } else { $null }
             if ($content -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
-                $Script:TunnelUrl = $Matches[0]
-                $found = $true
-                break
+                $Script:TunnelUrls += $Matches[0]
+                Write-LOk "Tunnel $($idx + 1) URL: $($Matches[0])"
+            } else {
+                $stillPending += $idx
             }
         }
+        $pending = $stillPending
     }
 
-    if ($found) {
-        Write-LOk "Tunnel URL: $($Script:TunnelUrl)"
-        # Write without BOM so other tools can read it cleanly
+    if ($pending.Count -gt 0) {
+        Write-LWarn "$($pending.Count)/$($Cfg.TunnelCount) tunnel(s) did not report a URL within $($Cfg.WaitTunnel)s — continuing with the $($Script:TunnelUrls.Count) that did"
+    }
+
+    if ($Script:TunnelUrls.Count -gt 0) {
+        $Script:TunnelUrl = $Script:TunnelUrls[0]   # backward-compat single-URL display below
+        Write-LOk "Pool ready: $($Script:TunnelUrls.Count) endpoint(s)"
+        # Write without BOM so other tools can read it cleanly — one URL per
+        # line, first line is the primary for anything only reading line 1.
         [System.IO.File]::WriteAllText(
             (Join-Path $Cfg.LogDir "current-tunnel-url.txt"),
-            $Script:TunnelUrl,
+            ($Script:TunnelUrls -join "`n"),
             [System.Text.UTF8Encoding]::new($false)   # UTF-8 no BOM
         )
     } else {
-        Write-LWarn "Could not capture URL within $($Cfg.WaitTunnel)s — check: $($Script:CfLogFile)"
+        Write-LWarn "No tunnel captured a URL — check logs under $($Cfg.LogDir)"
     }
 }
 
@@ -446,13 +487,19 @@ function Step-Tunnel {
 function Step-UpdateSecret {
     Write-Step "STEP 7 / UPDATE GITHUB SECRET"
 
-    if ([string]::IsNullOrEmpty($Script:TunnelUrl)) {
-        Write-LWarn "No tunnel URL — skipping secret update"
+    if ($Script:TunnelUrls.Count -eq 0) {
+        Write-LWarn "No tunnel URLs — skipping secret update"
         return
     }
 
-    Write-L "Setting $($Cfg.GithubSecret) → $($Script:TunnelUrl)"
-    $Script:TunnelUrl | gh secret set $Cfg.GithubSecret --repo $Cfg.GithubRepo 2>&1 |
+    # Comma-separated list — RuntimeConfig (lib/config/runtime_config.dart)
+    # splits this on commas into its endpoint pool. A single URL with no
+    # comma still works exactly as before this change (fully backward
+    # compatible), so this is safe even if TunnelCount is set to 1.
+    $csv = $Script:TunnelUrls -join ","
+    Write-L "Setting $($Cfg.GithubSecret) → $($Script:TunnelUrls.Count) endpoint(s)"
+    Write-LData $csv
+    $csv | gh secret set $Cfg.GithubSecret --repo $Cfg.GithubRepo 2>&1 |
         ForEach-Object { Write-LData $_ }
 
     if ($LASTEXITCODE -eq 0) {
@@ -477,7 +524,8 @@ function Step-CommitPush {
         $manifest = [ordered]@{
             build_date      = Get-Date -Format "yyyy-MM-dd"
             build_timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
-            server_url      = $Script:TunnelUrl
+            server_url      = $Script:TunnelUrl       # primary — backward compat
+            server_urls     = $Script:TunnelUrls       # full failover pool
             git_sha_before  = "$gitSha"
             trigger         = "gogogo222.ps1"
             run_ts          = $Script:RunTs
@@ -690,8 +738,9 @@ function Step-HelmDeployFn {
         "--set",             "image.tag=$gitSha"
     )
 
-    if ($Script:TunnelUrl) {
-        $helmArgs += @("--set", "env.LUGH_SERVER_URL=$($Script:TunnelUrl)")
+    if ($Script:TunnelUrls.Count -gt 0) {
+        $csv = $Script:TunnelUrls -join ","
+        $helmArgs += @("--set", "env.LUGH_SERVER_URL=$csv")
     }
 
     if ($Cfg.HelmValues -and (Test-Path $Cfg.HelmValues)) {
@@ -765,8 +814,12 @@ function Write-Summary {
     Write-Host ("═" * 54) -ForegroundColor Cyan
     Write-Host ""
 
-    $tu = if ($Script:TunnelUrl) { $Script:TunnelUrl } else { "not set — check tunnel log" }
-    Write-LOk "Server URL  : $tu"
+    if ($Script:TunnelUrls.Count -gt 0) {
+        Write-LOk "Server URLs : $($Script:TunnelUrls.Count) endpoint(s) (failover pool)"
+        foreach ($u in $Script:TunnelUrls) { Write-LData "  - $u" }
+    } else {
+        Write-LOk "Server URL  : not set — check tunnel log"
+    }
     Write-LOk "Local URL   : http://localhost:$($Cfg.TunnelPort)"
     Write-LOk "Android APK : $(Join-Path $Cfg.DesktopDir 'lugh-android-latest.apk')"
     Write-LOk "iOS IPA     : $(Join-Path $Cfg.DesktopDir 'lugh-ios-latest.ipa')"

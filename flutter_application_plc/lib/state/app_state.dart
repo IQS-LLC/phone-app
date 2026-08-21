@@ -355,6 +355,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     // already reported. See RuntimeConfig's doc comment and Scenario C/F
     // in the 2026-08-20 hardening pass.
     final requestVersion = _config.version;
+    final requestUrl     = _api.baseUrl;
     final result = await _api.getState();
     if (requestVersion != _config.version) {
       // Stale — a newer config change superseded this request while it was
@@ -363,6 +364,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       // left to do and must not touch _connected/_state.
       return;
     }
+    // Feeds the endpoint-failover health tracker — see RuntimeConfig's
+    // "Multi-endpoint failover" doc comment. This is the primary health
+    // signal: it rides on the poll that's already happening every ~1s, so a
+    // healthy active endpoint costs zero extra requests to keep monitoring.
+    _config.reportOutcome(
+      url: requestUrl, success: result.success,
+      errorCode: result.errorCode, statusCode: result.statusCode,
+      latencyMs: result.latencyMs,
+    );
     final wasConnected = _connected;
     final prevStatus   = _connectivityStatus;
     _connecting        = false;
@@ -460,11 +470,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _loadDevices() async {
     final requestVersion = _config.version;
+    final requestUrl     = _api.baseUrl;
     final result = await _api.getDevices();
     // Same stale-response guard as _poll() — a slow device-list fetch
     // against the old server must not populate the room grid with the old
     // apartment's devices after the user has already switched servers.
     if (requestVersion != _config.version) return;
+    _reportOutcome(requestUrl, result);
     if (!result.success || result.data == null) {
       _addLog('Failed to load device list', isError: true);
       return;
@@ -508,6 +520,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
+  /// Feeds one write command's outcome into the same endpoint-failover
+  /// health tracker _doPoll() reports to — see RuntimeConfig's
+  /// "Multi-endpoint failover" doc comment. [url] is captured by the
+  /// caller *before* the await, matching _doPoll()'s pattern, in case a
+  /// config change swaps _api out from under an in-flight write.
+  void _reportOutcome(String url, ApiResult<dynamic> result) {
+    _config.reportOutcome(
+      url: url, success: result.success,
+      errorCode: result.errorCode, statusCode: result.statusCode,
+      latencyMs: result.latencyMs,
+    );
+  }
+
   // ── DALI actions ───────────────────────────────────────────────────────────
 
   /// durationMs fades server-side instead of jumping instantly — caller
@@ -521,7 +546,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _activeSceneIndex           = null;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setDaliBrightness(channel, pct, durationMs: durationMs);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Command failed';
       _addLog('Ch$channel: $msg', isError: true);
@@ -538,7 +565,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _activeSceneIndex = sceneIndex;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setAllDaliBrightness(pct);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Set all failed';
       _addLog('Set all: $msg', isError: true);
@@ -560,7 +589,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _activeSceneIndex = null;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setRoomBrightness(room, pct);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Room command failed';
       _addLog('$room: $msg', isError: true);
@@ -581,7 +612,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingRelay[channel] = on;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setRelay(channel, on);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Relay command failed';
       _addLog('Relay ch$channel: $msg', isError: true);
@@ -601,7 +634,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     const cmdStr = {0: 'stop', 1: 'up', 2: 'down'};
+    final requestUrl = _api.baseUrl;
     final result = await _api.setCurtain(index, cmdStr[cmd]!);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Curtain command failed';
       _addLog('Curtain $index: $msg', isError: true);
@@ -618,7 +653,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     const cmdStr = {0: 'stop', 1: 'up', 2: 'down'};
+    final requestUrl = _api.baseUrl;
     final result = await _api.setCurtainAll(cmdStr[cmd]!);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Curtain all failed';
       _addLog('Curtain all: $msg', isError: true);
@@ -636,7 +673,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingAppliance[gvlName] = on;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setAppliance(gvlName, on);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Appliance command failed';
       _addLog('$gvlName: $msg', isError: true);
@@ -654,7 +693,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingToggle[varName] = on;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setToggle(varName, on);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Command failed';
       _addLog('$varName: $msg', isError: true);
@@ -672,7 +713,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingAlarm = armed;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setAlarm(armed);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Alarm command failed';
       _addLog('Alarm: $msg', isError: true);
@@ -691,7 +734,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _pendingLockdown = active;
     notifyListeners();
 
+    final requestUrl = _api.baseUrl;
     final result = await _api.setLockdown(active);
+    _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Lockdown command failed';
       _addLog('Lockdown: $msg', isError: true);

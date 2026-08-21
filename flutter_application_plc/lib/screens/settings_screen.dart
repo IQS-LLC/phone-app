@@ -773,6 +773,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : (s.connectivityStatus == ConnectivityStatus.plcDown ? C.orange : C.red),
               badge: true,
             ),
+            // Only shown once more than one endpoint is actually configured —
+            // temporary multi-tunnel failover bridge (2026-08-21), see
+            // RuntimeConfig's doc comment. Stays invisible for the common
+            // single-endpoint case so this doesn't clutter Settings for
+            // everyone once real WAN connectivity retires the whole pool.
+            if ((widget.authState?.hasInstallerAccess == true ||
+                    widget.authState?.user?.isStaff == true) &&
+                RuntimeConfig.instance.endpointCount > 1) ...[
+              const Divider(height: 0.5, thickness: 0.5, color: C.border),
+              _InfoRow(
+                icon: Icons.alt_route_rounded, label: 'Failover',
+                value:
+                    '${RuntimeConfig.instance.endpoints.where((e) => e.isHealthy).length}'
+                    '/${RuntimeConfig.instance.endpointCount} endpoints healthy · via ${RuntimeConfig.instance.activeHost}',
+                valueColor: C.textSec,
+              ),
+            ],
             const Divider(height: 0.5, thickness: 0.5, color: C.border),
             _InfoRow(
               icon: Icons.memory_rounded, label: 'PLC Mode',
