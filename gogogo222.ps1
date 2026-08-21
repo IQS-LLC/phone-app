@@ -86,6 +86,15 @@ $Cfg = @{
     # Tunnel
     CloudflaredExe   = if ($env:CLOUDFLARED_EXE)   { $env:CLOUDFLARED_EXE }   else { "C:\Users\Automation\Desktop\cloudflared.exe" }
     TunnelPort       = if ($env:TUNNEL_PORT)        { $env:TUNNEL_PORT }       else { "8090" }
+    # Host the tunnel(s) proxy to. Defaults to localhost, matching this
+    # script's own docker-compose.dev.yml stack a few steps up — but found
+    # live 2026-08-21 that isn't always where the real backend runs: this
+    # project's actual live server has been a separate VM reachable over
+    # LAN, in which case localhost:8090 has nothing listening and every
+    # tunnel built from the default would silently proxy to a dead target.
+    # Override with TUNNEL_TARGET_HOST when tunnelling a remote box instead
+    # of this script's own local stack.
+    TunnelTargetHost = if ($env:TUNNEL_TARGET_HOST) { $env:TUNNEL_TARGET_HOST} else { "localhost" }
     # How many concurrent quick tunnels to run — temporary multi-endpoint
     # failover bridge (2026-08-21) until the server has real WAN
     # connectivity, so a single dead/slow/edge-throttled Cloudflare tunnel
@@ -400,8 +409,10 @@ function Step-NginxReload {
 function Step-Tunnel {
     Write-Step "STEP 6 / CLOUDFLARE QUICK TUNNELS ($($Cfg.TunnelCount)x, failover pool)"
 
+    $tunnelTarget = "http://$($Cfg.TunnelTargetHost):$($Cfg.TunnelPort)"
+
     if (-not (Test-Path $Cfg.CloudflaredExe)) {
-        Write-LWarn "cloudflared not found — skipping (local only at http://localhost:$($Cfg.TunnelPort))"
+        Write-LWarn "cloudflared not found — skipping (local only at $tunnelTarget)"
         return
     }
 
@@ -414,19 +425,20 @@ function Step-Tunnel {
     $Script:CfProcs    = @()
     $Script:CfLogFiles = @()
 
-    # All N processes proxy the SAME local backend — each just gets its own
-    # independent trycloudflare.com hostname from Cloudflare's edge. This is
-    # what makes the pool a real failover set rather than N copies of one
-    # endpoint: if any one tunnel process dies or its hostname gets
-    # throttled, the others are unaffected.
+    # All N processes proxy the SAME backend (TunnelTargetHost:TunnelPort —
+    # not necessarily localhost, see that config's comment) — each just
+    # gets its own independent trycloudflare.com hostname from Cloudflare's
+    # edge. This is what makes the pool a real failover set rather than N
+    # copies of one endpoint: if any one tunnel process dies or its
+    # hostname gets throttled, the others are unaffected.
     for ($i = 1; $i -le $Cfg.TunnelCount; $i++) {
         $logFile = Join-Path $Cfg.LogDir "cloudflared-$($Script:RunTs)-$i.log"
         if (Test-Path $logFile) { Remove-Item $logFile -Force }
 
-        Write-L "Starting cloudflared tunnel $i/$($Cfg.TunnelCount) → http://localhost:$($Cfg.TunnelPort)"
+        Write-L "Starting cloudflared tunnel $i/$($Cfg.TunnelCount) → $tunnelTarget"
         $proc = Start-Process `
             -FilePath       $Cfg.CloudflaredExe `
-            -ArgumentList   "tunnel --url http://localhost:$($Cfg.TunnelPort)" `
+            -ArgumentList   "tunnel --url $tunnelTarget" `
             -RedirectStandardError $logFile `
             -NoNewWindow `
             -PassThru
