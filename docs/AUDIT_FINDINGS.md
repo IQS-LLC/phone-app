@@ -92,7 +92,8 @@ don't talk to each other:
 - **`QUICK_START.md`, `QUICK_START_AUTO.md`, `SERVER_DEPLOYMENT.md`** all
   describe the same fictional single-container/`auto_deploy.sh` architecture
   as old `README.md`.
-- **`docs/INFRASTRUCTURE.md` + `infra/helm/`** describe a k3s/Helm deployment
+- **`docs/INFRASTRUCTURE.md`** (now archived at `docs/legacy/INFRASTRUCTURE.md`,
+  and `infra/helm/` at `infra_legacy_k3s/helm/` — see below) described a k3s/Helm deployment
   (host `192.168.0.192`) never referenced by `CLAUDE.md` or
   `docs/DEPLOYMENT_MANUAL.md` (the two docs that match the real, current
   NAS/docker-compose/Cloudflare-Tunnel production setup). Its last commit is
