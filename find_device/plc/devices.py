@@ -1,35 +1,31 @@
 """
 PLC device abstractions built on top of ADSClient.
 
-Variable map — gvlDALI (DALI + relays + switches):
-  DALI dimmers (channel 1-28, hardware supports up to 28; 1-16 currently
-  configured in registry.py) — declared in gvlDALI but NOT YET WIRED into
-  the live POU.TcPOU CFC (see that file's TODO comments). Until wired, app
-  brightness commands write the GVL but have no effect on hardware, and
-  aPyActualLevel reads back stale/zero values:
-    gvlDALI.aPyLevel[N]        BYTE   0-254   Python→PLC  desired level
-    gvlDALI.aPySetLevel[N]     BOOL            Python→PLC  rising edge commits
-    gvlDALI.aPyActualLevel[N]  BYTE   0-254   PLC→Python  confirmed readback
+Corrected 2026-08-24: this docstring previously quoted a specific variable
+table (aPyLevel/aPyWallRelay/aPySwitchState/gvlIO.aPyCurtainCmd) that had
+gone stale relative to the actual per-class implementations below and was
+never caught because nothing re-derives this comment from the real code.
+Each class's own docstring is now the authoritative source for its exact
+GVL/variable names — read those directly rather than trusting a summary
+here, which is exactly the kind of drift that caused this correction. See
+docs/plc-integration.md for the current, real GVL layout and
+docs/AUDIT_FINDINGS.md §1 for the full audit that found this.
 
-  Wall relays (channel 1-4; matches the 4 physical bRelay0-3 / KL2809
-  terminals — wired and live in WallLight_POU.TcPOU):
-    gvlDALI.aPyWallRelay[N]      BOOL          Python→PLC  command
-    gvlDALI.aPyWallRelayState[N] BOOL          PLC→Python  readback
+What's still true and worth knowing before reading the classes below:
 
-  BTicino switches (index 1-48):
-    gvlDALI.aPySwitchState[N]    BOOL          PLC→Python  live button state
-    NOTE: this array does not exist in either apartment's TwinCAT project.
-    SwitchInput reads will fail against a real (non-mock) PLC.
-
-Variable map — gvlIO (all other devices):
-  NONE OF THE BELOW HAS ANY BACKING HARDWARE in Apartment 16 or 8's EtherCAT
-  I/O configuration (no curtain motor terminals, no appliance relays, no
-  door/window contacts beyond the 4 already used by WallLight_POU, no
-  separate security I/O). There is no gvlIO GVL in either TwinCAT project.
-  CurtainMotor, ApplianceRelay, MagneticSensor, MotionSensor and
-  SecurityController will all fail reads/writes against a real PLC — they
-  only work in PLC_MOCK mode. Treat this whole section as a future-hardware
-  placeholder, not a working integration, until real terminals exist.
+- DALI dimmer *brightness* channels (`DaliChannel`) write their GVL
+  correctly but are not yet wired into the live PLC control logic — see
+  `docs/plc_proposals/README.md` for why (a related change broke
+  building-wide switch lighting once live and both were reverted together)
+  and the plan to fix it. Wall relays went through the same kind of
+  proposal-then-revert cycle but were later re-applied via a different,
+  isolated bridge GVL/POU that IS live — see `WallRelay`'s own docstring.
+- `ApplianceRelay`, `MagneticSensor`, `MotionSensor` (indices 5-8), and
+  `SecurityController` target a `gvlIO` GVL that does not exist in either
+  apartment's real TwinCAT project — these only work in `PLC_MOCK` mode
+  until matching hardware and PLC logic exist. See
+  `docs/plc-integration.md`'s Hardware Support Matrix for the current,
+  device-by-device state.
   Curtain motors (index 1-16):
     gvlIO.aPyCurtainCmd[N]     BYTE  0=stop 1=up 2=down   Python→PLC
     gvlIO.aPyCurtainState[N]   BYTE  0/1/2                PLC→Python readback
@@ -656,3 +652,105 @@ class SecurityController:
 
     def to_dict(self) -> Dict[str, Any]:
         return {'device_type': 'security_controller'}
+
+
+# ── TemplatedDevice ──────────────────────────────────────────────────────────
+
+# Maps DeviceAddressScheme.plc_type (a plain string, kept in the DB rather
+# than a pyads object so schemes stay serializable/DB-safe) to the actual
+# pyads.PLCTYPE_* constant ADSClient.read()/write() need. Deliberately the
+# same string vocabulary find_device/discovery/classifier.py already uses
+# for _BOOL_TYPES/_INT_TYPES/_REAL_TYPES/_STR_TYPES, so a scheme built from
+# a SuperScan-discovered symbol's type_name needs no translation.
+_PLC_TYPE_MAP = {
+    'BOOL':    pyads.PLCTYPE_BOOL,
+    'BYTE':    pyads.PLCTYPE_BYTE,
+    'INT':     pyads.PLCTYPE_INT,
+    'UINT':    pyads.PLCTYPE_UINT,
+    'DINT':    pyads.PLCTYPE_DINT,
+    'UDINT':   pyads.PLCTYPE_UDINT,
+    'SINT':    pyads.PLCTYPE_SINT,
+    'USINT':   pyads.PLCTYPE_USINT,
+    'WORD':    pyads.PLCTYPE_WORD,
+    'DWORD':   pyads.PLCTYPE_DWORD,
+    'REAL':    pyads.PLCTYPE_REAL,
+    'LREAL':   pyads.PLCTYPE_LREAL,
+    'STRING':  pyads.PLCTYPE_STRING,
+    'WSTRING': pyads.PLCTYPE_WSTRING,
+}
+
+
+class TemplatedDevice:
+    """
+    A device whose GVL addressing comes from a DeviceAddressScheme database
+    row instead of being hardcoded in a Python class — the "new GVL layout
+    without writing new Python" escape hatch. See
+    find_device.models.DeviceAddressScheme's docstring for the full design
+    rationale, and docs/plc-integration.md for when to reach for this vs.
+    writing a real class the way every other device type in this file does.
+
+    Deliberately narrower than the hardcoded classes above: it supports the
+    common read/write(-then-commit-pulse) shape that DaliChannel/WallRelay/
+    CurtainMotor all already share, not every possible protocol nuance
+    (e.g. CurtainMotor's momentary-button semantics still need a real
+    class). A scheme whose device genuinely needs bespoke logic should
+    become a real class, following the pattern of any class above it in
+    this file — this exists for the common case, not every case.
+
+    A malformed template (e.g. referencing a placeholder the scheme's
+    format_var doesn't provide) raises immediately from __init__, so a bad
+    DeviceAddressScheme row fails loud at DeviceRegistry._start() time —
+    surfaced as a startup warning for that one device, exactly like any
+    other per-device construction failure already is — rather than
+    resolving to a wrong variable name that silently reads/writes nothing
+    useful.
+    """
+
+    def __init__(self, apartment_device_id: int, channel_or_index: Optional[int],
+                 gvl_name: str, name: str, room: str, client, scheme):
+        self.apartment_device_id = apartment_device_id
+        self.name                = name
+        self.room                = room
+        self._client             = client
+        self._scheme              = scheme
+        self._mock_value         = False if scheme.plc_type == 'BOOL' else 0
+
+        fmt = lambda t: scheme.format_var(t, channel_or_index=channel_or_index, gvl_name=gvl_name)
+        self._var_read   = fmt(scheme.read_var_template)  if scheme.read_var_template  else None
+        self._var_write  = fmt(scheme.write_var_template) if scheme.write_var_template else None
+        self._var_commit = fmt(scheme.commit_var_template) if scheme.commit_var_template else None
+        self._plctype = _PLC_TYPE_MAP.get(scheme.plc_type, pyads.PLCTYPE_BOOL)
+
+    def read(self) -> Any:
+        if self._var_read is None:
+            raise ValueError(f"DeviceAddressScheme '{self._scheme.name}' has no read_var_template")
+        if self._client.mock:
+            return self._mock_value
+        return self._client.read(self._var_read, self._plctype)
+
+    def write(self, value: Any):
+        """
+        Writes value, then pulses the commit variable true->false if the
+        scheme has one — the same write-then-commit-pulse shape
+        DaliChannel.set_brightness()/WallRelay already use, generalized.
+        A scheme with no commit_var_template just writes once, for GVLs
+        that apply a write immediately with no separate commit pin.
+        """
+        if self._var_write is None:
+            raise ValueError(f"DeviceAddressScheme '{self._scheme.name}' has no write_var_template")
+        if self._client.mock:
+            self._mock_value = value
+            return
+        self._client.write(self._var_write, value, self._plctype)
+        if self._var_commit is not None:
+            self._client.write(self._var_commit, True, pyads.PLCTYPE_BOOL)
+            time.sleep(0.05)
+            self._client.write(self._var_commit, False, pyads.PLCTYPE_BOOL)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'apartment_device_id': self.apartment_device_id,
+            'name': self.name, 'room': self.room,
+            'device_type': 'templated',
+            'address_scheme': self._scheme.name,
+        }

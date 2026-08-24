@@ -306,6 +306,13 @@ class ApartmentDevice(models.Model):
     TYPE_MOTION_SENSOR = "motion_sensor"
     TYPE_TOGGLE        = "toggle"
     TYPE_NAMED_SWITCH  = "named_switch"
+    # For a DeviceAddressScheme-driven device (see address_scheme below)
+    # whose shape doesn't map cleanly onto any type above — e.g. a
+    # SuperScan-discovered symbol promoted via superscan_views.promote_capability
+    # with no existing class it resembles. Purely descriptive: the registry
+    # dispatches on address_scheme_id being set, not on this value, for any
+    # row that has a scheme — see registry.DeviceRegistry._start().
+    TYPE_CUSTOM        = "custom"
     TYPE_CHOICES = [
         (TYPE_DALI, "DALI dimmer"),
         (TYPE_RELAY, "Wall relay"),
@@ -317,6 +324,7 @@ class ApartmentDevice(models.Model):
         (TYPE_MOTION_SENSOR, "Motion sensor"),
         (TYPE_TOGGLE, "Named relay/light"),
         (TYPE_NAMED_SWITCH, "Named switch input"),
+        (TYPE_CUSTOM, "Custom (scheme-driven)"),
     ]
 
     apartment        = models.ForeignKey(Apartment, on_delete=models.CASCADE, related_name="devices")
@@ -327,6 +335,23 @@ class ApartmentDevice(models.Model):
     name             = models.CharField(max_length=100)
     sort_order       = models.PositiveIntegerField(default=0)
 
+    # Added 2026-08-24, nullable, defaults to null on every existing row —
+    # see DeviceAddressScheme's docstring. When set, DeviceRegistry builds
+    # this device as a devices.TemplatedDevice using the scheme's GVL
+    # templates instead of dispatching on device_type to one of the
+    # hardcoded classes below. When null (every device created before this
+    # field existed, and every device created the normal way since), this
+    # column has no effect whatsoever — DeviceRegistry's existing dispatch
+    # is completely unchanged.
+    address_scheme = models.ForeignKey(
+        "DeviceAddressScheme", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="devices",
+        help_text="Optional. Leave blank to use the built-in Python class "
+                   "for this device_type (the normal, tested path). Set "
+                   "this only for a device whose GVL layout doesn't match "
+                   "any existing hardcoded class — see docs/plc-integration.md.",
+    )
+
     class Meta:
         ordering = ["device_type", "sort_order", "channel_or_index"]
         indexes = [
@@ -336,6 +361,125 @@ class ApartmentDevice(models.Model):
     def __str__(self) -> str:
         ident = self.gvl_name or self.channel_or_index
         return f"{self.apartment.name} / {self.device_type}[{ident}] {self.name}"
+
+
+class DeviceAddressScheme(models.Model):
+    """
+    A reusable, named GVL addressing pattern — added 2026-08-24 so a new PLC
+    generation or a different integrator's naming convention can be
+    expressed as a database row instead of a new Python class in
+    find_device/plc/devices.py. See docs/plc-integration.md for the full
+    design rationale and docs/AUDIT_FINDINGS.md §1 for why this exists (the
+    control path had hardcoded a GVL prefix + addressing formula per device
+    class, so every new GVL layout meant writing new Python).
+
+    Deliberately additive: ApartmentDevice.address_scheme is nullable and
+    defaults to null on every existing row. A device with no scheme keeps
+    using devices.py's existing hardcoded classes exactly as before this
+    model existed — nothing about current apartments changes by this model
+    merely existing. See devices.TemplatedDevice for the class that
+    interprets a scheme, and registry.DeviceRegistry._start() for the one
+    new branch that constructs it instead of a hardcoded class.
+
+    Template placeholders (plain str.format(), never eval — deliberately
+    not a general expression language, to keep a bad template fail loud
+    with a KeyError/IndexError rather than execute arbitrary code):
+      {gvl}      -> this row's own `gvl` field
+      {index}    -> the owning ApartmentDevice.channel_or_index + index_offset
+      {gvl_name} -> the owning ApartmentDevice.gvl_name, verbatim
+
+    index_offset exists because real addressing isn't always a direct
+    channel-number substitution — e.g. WallRelay's actual, current formula
+    is `gvlDALI.bRelay{channel-1}` (zero-based array, one-based channel
+    number in the UI/DB). Rather than allow arbitrary arithmetic in a
+    template string, the one offset real schemes have needed so far is a
+    first-class field.
+    """
+
+    PROTOCOL_ADS    = "ads"
+    PROTOCOL_MODBUS = "modbus"
+    PROTOCOL_BOTH   = "both"
+    PROTOCOL_CHOICES = [
+        (PROTOCOL_ADS, "ADS only"),
+        (PROTOCOL_MODBUS, "Modbus only"),
+        (PROTOCOL_BOTH, "ADS with Modbus fallback"),
+    ]
+
+    # Matches the raw ADS type vocabulary find_device/discovery/classifier.py
+    # already uses (_BOOL_TYPES/_INT_TYPES/_REAL_TYPES/_STR_TYPES) — reused
+    # rather than inventing a second type vocabulary for the same concept.
+    PLC_TYPE_CHOICES = [
+        ("BOOL", "BOOL"),
+        ("BYTE", "BYTE"), ("INT", "INT"), ("UINT", "UINT"),
+        ("DINT", "DINT"), ("UDINT", "UDINT"),
+        ("SINT", "SINT"), ("USINT", "USINT"),
+        ("WORD", "WORD"), ("DWORD", "DWORD"),
+        ("REAL", "REAL"), ("LREAL", "LREAL"),
+        ("STRING", "STRING"), ("WSTRING", "WSTRING"),
+    ]
+
+    name        = models.CharField(
+        max_length=100, unique=True,
+        help_text="Short, versioned identifier, e.g. 'apt16_dali_v1'. A "
+                   "different PLC generation or naming convention is a new "
+                   "row with a new name, never an edit to an existing one "
+                   "that's already in use — devices already pointing at a "
+                   "scheme must not have its meaning change under them.",
+    )
+    description = models.CharField(max_length=255, blank=True)
+
+    gvl                 = models.CharField(max_length=50, help_text="e.g. gvlController")
+    read_var_template   = models.CharField(max_length=150, blank=True)
+    write_var_template  = models.CharField(max_length=150, blank=True)
+    commit_var_template = models.CharField(
+        max_length=150, blank=True,
+        help_text="Optional rising-edge 'commit' variable for the "
+                   "write-then-pulse pattern DaliChannel/WallRelay already "
+                   "use (see devices.py) — leave blank if this scheme's "
+                   "write_var_template alone is sufficient.",
+    )
+    index_offset = models.IntegerField(
+        default=0,
+        help_text="Added to the owning device's channel_or_index before "
+                   "it's substituted into a template as {index}.",
+    )
+
+    plc_type = models.CharField(max_length=10, choices=PLC_TYPE_CHOICES, default="BOOL")
+    protocol = models.CharField(max_length=10, choices=PROTOCOL_CHOICES, default=PROTOCOL_ADS)
+
+    # Reuses find_device/discovery/classifier.py's WIDGET_* vocabulary as
+    # plain strings (not a FK/import — classifier.py has no models and
+    # shouldn't need to) so a scheme-driven device renders with the same
+    # widget catalogue a SuperScan-discovered one does.
+    widget_type = models.CharField(
+        max_length=20, blank=True,
+        help_text="One of find_device.discovery.classifier's WIDGET_* "
+                   "values, e.g. 'dali_slider', 'toggle'. Blank is fine — "
+                   "the UI falls back to device_type-based rendering.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Device Address Scheme"
+        verbose_name_plural = "Device Address Schemes"
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.gvl}, {self.protocol})"
+
+    def format_var(self, template: str, *, channel_or_index, gvl_name: str) -> str:
+        """
+        Render one of this scheme's templates against an owning device's
+        identity. Raises KeyError/IndexError on a malformed template rather
+        than silently producing a wrong variable name — see
+        devices.TemplatedDevice for how that surfaces as a real, loud
+        connection error instead of a mysteriously-nonresponsive device.
+        """
+        index = None
+        if channel_or_index is not None:
+            index = channel_or_index + self.index_offset
+        return template.format(gvl=self.gvl, index=index, gvl_name=gvl_name)
 
 
 class AutomationRule(models.Model):

@@ -114,21 +114,43 @@ this codebase currently have two different vocabularies:
    table + regex name-token patterns + ADS type, with a safe `unknown`
    fallback for anything it doesn't recognize.
 
-**The gap**: SuperScan's classification is currently *display-only* — it
-populates a read-only discovery dashboard but never creates the
-`ApartmentDevice` rows that `DeviceRegistry` actually builds live control
-objects from. An installer still manually creates `ApartmentDevice` rows
-(setting `channel_or_index` and `gvl_name`), and those rows are only
-understood by whichever hardcoded `devices.py` class matches their
-`device_type` — adding a genuinely new GVL layout (a different PLC
-generation, a different integrator's naming convention) means writing a new
-Python class today, not adding a config row.
+**The gap, and how it's now bridged (2026-08-24):** SuperScan's
+classification used to be *display-only* — it populated a read-only
+discovery dashboard but never created the `ApartmentDevice` rows
+`DeviceRegistry` actually builds live control objects from. Two additions
+close that gap for the common case:
+
+- **`find_device.models.DeviceAddressScheme`** — a database row that
+  carries a GVL prefix + `.format()`-style read/write/commit templates +
+  PLC type + protocol, instead of a hardcoded Python class. `ApartmentDevice`
+  has an optional `address_scheme` FK; when set, `DeviceRegistry._start()`
+  builds that row as a `devices.TemplatedDevice` instead of dispatching on
+  `device_type` to a hardcoded class. Every device created before this field
+  existed (and every one created the normal way since) has `address_scheme
+  = null` and is completely unaffected — this is purely additive.
+- **`POST /superscan/<apartment_id>/capabilities/<cap_id>/promote/`**
+  (staff-only, `superscan_views.promote_capability`) — creates that
+  `ApartmentDevice` + `DeviceAddressScheme` directly from a
+  SuperScan-discovered symbol's `raw_var_name`/`data_type`, so a discovered
+  symbol can become a controllable device without hand-editing the database.
+
+**Still a real limit, by design**: the promote endpoint and
+`TemplatedDevice` only handle the simple case — one fixed scalar symbol (or
+an indexed one via `index_offset`), read/write with an optional
+commit-pulse. A device whose *protocol shape* differs (not just its
+address) — e.g. `CurtainMotor`'s momentary-button semantics — still needs a
+real Python class, the same as every class below. Adding a new GVL layout
+that fits the simple shape is now a database row; anything with genuinely
+different protocol behavior is still new Python, and that's an intentional
+boundary, not an oversight — see the class docstrings for the more nuanced
+patterns (write-then-pulse-commit, batch reads, momentary buttons) a bare
+template can't express.
 
 ### Hardware Support Matrix (as of the 2026-08-24 audit)
 
 | Device class | GVL | Real hardware today? | Notes |
 |---|---|---|---|
-| `DaliChannel` | `gvlController` | Partial | Relay-driven channels work; DALI dimmer channels write the GVL correctly but aren't wired into the live PLC logic yet (TwinCAT-side task) |
+| `DaliChannel` | `gvlController` | Partial | Relay-driven channels work; DALI dimmer channels write the GVL correctly but aren't wired into the live PLC logic yet (TwinCAT-side task) — see `docs/plc_proposals/README.md` for the proposed fix, why it's not deployed (a related change broke building-wide switch lighting once live and both were reverted together), and the plan to re-apply and test in isolation |
 | `WallRelay` | `gvlDALI`/`gvlController` | Yes | |
 | `SwitchInput` | `gvlDALI` | Yes, for indices with real wiring — index 3 has a known symbol mismatch (pre-existing, unfixed) | |
 | `MotionSensor` | `gvlDALI` | Indices 1-4 only | Indices 5-8 are mock-only |
@@ -138,23 +160,31 @@ Python class today, not adding a config row.
 
 ### Extending to a new GVL layout or device generation
 
-Today, this genuinely requires writing a new Python class in
-`find_device/plc/devices.py` following the existing pattern (see any of the
-classes above), then wiring it into `find_device/plc/registry.py`'s
-`DeviceRegistry._start()` dispatch. There is an in-progress design (see
-`docs/AUDIT_FINDINGS.md`'s referenced plan) to add a `DeviceAddressScheme`
-model that lets `ApartmentDevice` carry its own GVL prefix and addressing
-template from the database instead — check whether that has landed
-(`find_device/models.py`, search for `DeviceAddressScheme`) before writing a
-new hardcoded class; if it exists, prefer it for anything that's a pure
-addressing difference rather than a genuinely different protocol shape.
+Two paths, depending on what's actually different:
 
-**Honest limit**: an address-template approach can't cover every possible
-future device — some devices differ in *protocol shape*, not just address
-(e.g. `CurtainMotor`'s momentary-button model vs. a hypothetical
-position-feedback curtain motor needs different read/write semantics
-entirely, not just a different symbol name). A protocol-shape change still
-needs a new Python class.
+1. **A pure addressing/naming difference** (a different GVL prefix, a
+   different array-index convention, a different PLC generation that
+   exposes the same read/write/commit shape under different names) — create
+   a `DeviceAddressScheme` row (Django admin, or via the promote endpoint if
+   the symbol was SuperScan-discovered first) and point an `ApartmentDevice`
+   at it via `address_scheme`. No Python change, no redeploy. See
+   `find_device/models.py`'s `DeviceAddressScheme` docstring for the exact
+   template placeholders (`{gvl}`, `{index}`, `{gvl_name}`) and
+   `find_device/plc/devices.py`'s `TemplatedDevice` for how it's interpreted.
+2. **A genuinely different protocol shape** — e.g. a device where reading
+   back the confirmed state needs a different variable than a simple
+   readback, or command semantics that aren't "write a value, optionally
+   pulse a commit bit" (like `CurtainMotor`'s momentary-button model, or a
+   hypothetical position-feedback curtain motor). This still needs a new
+   Python class in `devices.py` following the pattern of the classes above,
+   wired into `DeviceRegistry._start()`'s dispatch — a bare address template
+   can't express arbitrary protocol logic, and that's intentional: forcing
+   real logic into a template string would make it harder to read and test,
+   not easier.
+
+When unsure which case you're in: if you can describe the fix as "same kind
+of read/write, different variable name," it's case 1. If you find yourself
+wanting an `if` statement inside the template, it's case 2.
 
 ### Modbus TCP fallback
 

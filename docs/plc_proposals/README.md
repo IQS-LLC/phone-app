@@ -1,5 +1,20 @@
 # Proposed TwinCAT changes for real app control (Apartment 16)
 
+**2026-08-24 update — the wall-relay half of this was superseded, and now
+works.** After the revert described below, wall-relay *writes* were later
+re-implemented through a different, isolated bridge GVL/POU
+(`gvlController`/`POU_Controller`) that never touches `WallLight_POU` at
+all — avoiding the exact conflict that caused the original outage. That
+bridge is live today; see `find_device/plc/devices.py`'s `WallRelay` class
+docstring for the real, current variable names. `django_side_status.md`'s
+description of relay writes failing with `symbol not found` describes the
+state *before* that later fix and is no longer accurate for relays — it's
+kept below for the historical record and because the underlying lesson
+(test wall-relay-scale and DALI-scale changes as separate build/download
+cycles) still stands. **The DALI dimmer half described below is still
+accurate** — DALI brightness channels are not wired into live PLC logic
+today; see `docs/plc-integration.md`'s Hardware Support Matrix.
+
 **Status: this wall-relay change (and the related DALI one) was applied,
 built, and downloaded to the real CX8190 — and has since been reverted.**
 The DALI proposal's `bOn` wiring (see `dali_dimmer_control.md`) broke

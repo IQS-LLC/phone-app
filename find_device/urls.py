@@ -162,6 +162,7 @@ superscan_urlpatterns = [
     path('<int:apartment_id>/runs/<int:scan_id>/stop/',   superscan_views.stop,               name='superscan-run-stop'),
     path('<int:apartment_id>/capabilities/',              superscan_views.capability_list,   name='superscan-capabilities'),
     path('<int:apartment_id>/capabilities/<int:cap_id>/', superscan_views.capability_detail,  name='superscan-capability-detail'),
+    path('<int:apartment_id>/capabilities/<int:cap_id>/promote/', superscan_views.promote_capability, name='superscan-capability-promote'),
 ]
 
 # Mounted at /map/ in PLC_Project/urls.py

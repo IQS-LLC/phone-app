@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     Apartment, ApartmentDevice, ApartmentMembership, AuditLog,
-    CanvasObject, DiscoveryCache, MapLayer, MapLayout, MapVersion,
+    CanvasObject, DeviceAddressScheme, DiscoveryCache, MapLayer, MapLayout, MapVersion,
     PLCDevice, Permission, Role, Room, SessionInfo,
     TemporaryAccess, UserProfile,
 )
@@ -41,10 +41,18 @@ class RoomAdmin(admin.ModelAdmin):
 
 @admin.register(ApartmentDevice)
 class ApartmentDeviceAdmin(admin.ModelAdmin):
-    list_display  = ("name", "apartment", "device_type", "channel_or_index", "gvl_name", "room", "sort_order")
-    list_filter   = ("device_type", "apartment")
+    list_display  = ("name", "apartment", "device_type", "channel_or_index", "gvl_name", "room", "address_scheme", "sort_order")
+    list_filter   = ("device_type", "apartment", "address_scheme")
     search_fields = ("name", "apartment__name", "gvl_name")
-    autocomplete_fields = ("apartment", "room")
+    autocomplete_fields = ("apartment", "room", "address_scheme")
+
+
+@admin.register(DeviceAddressScheme)
+class DeviceAddressSchemeAdmin(admin.ModelAdmin):
+    list_display  = ("name", "gvl", "plc_type", "protocol", "widget_type", "updated_at")
+    list_filter   = ("protocol", "plc_type")
+    search_fields = ("name", "gvl", "description")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(Permission)

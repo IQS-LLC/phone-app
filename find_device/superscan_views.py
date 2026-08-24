@@ -18,7 +18,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 
-from .models import Apartment, ScanRun, DiscoveredCapability
+from .models import Apartment, ApartmentDevice, DeviceAddressScheme, Room, ScanRun, DiscoveredCapability
 from .permissions import log_action
 from .superscan import start_scan, ScanAlreadyRunning
 
@@ -159,3 +159,86 @@ def capability_detail(request, apartment_id, cap_id):
     cap = get_object_or_404(DiscoveredCapability, pk=cap_id, apartment_id=apartment_id)
     logs = cap.test_logs.all()[:50]
     return _ok(capability=cap.to_dict(), test_logs=[l.to_dict() for l in logs])
+
+
+# ── Promote: DiscoveredCapability -> a real, controllable ApartmentDevice ───
+
+# The 2026-08-24 bridge closing the gap docs/AUDIT_FINDINGS.md §1 describes:
+# SuperScan discovers and classifies symbols dynamically, but that knowledge
+# never used to reach DeviceRegistry — an installer had to already know the
+# right ApartmentDevice/gvl_name mapping by hand. This endpoint creates that
+# ApartmentDevice (+ a DeviceAddressScheme, unless an existing one is
+# reused) directly from what SuperScan already discovered.
+#
+# Deliberately the simple case only: treats raw_var_name as one fixed
+# scalar symbol (no {index}/{gvl_name} templating, no commit-pulse
+# variable) — correct for a plain read/write point, not for an indexed
+# array or a write-then-pulse-commit GVL. A capability needing either of
+# those still needs a hand-built DeviceAddressScheme (Django admin) or a
+# real devices.py class, same as before this endpoint existed.
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
+def promote_capability(request, apartment_id, cap_id):
+    """
+    Body (all optional except when noted):
+      room_id      int  — Room to assign; omitted/null leaves it unassigned
+      name         str  — display name; defaults to the capability's own name/identifier
+      device_type  str  — one of ApartmentDevice.TYPE_CHOICES; defaults to "custom"
+      scheme_name  str  — reuse an existing DeviceAddressScheme by name instead of
+                           creating a new one (e.g. a second symbol on the same GVL/type)
+    """
+    apt = get_object_or_404(Apartment, pk=apartment_id)
+    cap = get_object_or_404(DiscoveredCapability, pk=cap_id, apartment_id=apartment_id)
+
+    if cap.apartment_device_id:
+        return _err("This capability is already linked to an ApartmentDevice.", status=409)
+    if not cap.raw_var_name:
+        return _err("This capability has no raw_var_name to build an address scheme from — "
+                     "promotion only works for a real scanned symbol.", status=400)
+
+    room = None
+    if room_id := request.data.get("room_id"):
+        room = get_object_or_404(Room, pk=room_id, apartment=apt)
+
+    name = request.data.get("name") or cap.name or cap.identifier
+    device_type = request.data.get("device_type") or ApartmentDevice.TYPE_CUSTOM
+    if device_type not in dict(ApartmentDevice.TYPE_CHOICES):
+        return _err(f"Invalid device_type. Choose one of: {', '.join(dict(ApartmentDevice.TYPE_CHOICES))}")
+
+    scheme_name = request.data.get("scheme_name")
+    if scheme_name:
+        scheme = get_object_or_404(DeviceAddressScheme, name=scheme_name)
+    else:
+        gvl = cap.raw_var_name.split(".", 1)[0] if "." in cap.raw_var_name else cap.raw_var_name
+        plc_type = (cap.data_type or "BOOL").upper()
+        if plc_type not in dict(DeviceAddressScheme.PLC_TYPE_CHOICES):
+            return _err(
+                f"Discovered data_type '{cap.data_type}' doesn't match a known PLC "
+                f"type ({', '.join(dict(DeviceAddressScheme.PLC_TYPE_CHOICES))}) — "
+                "promote with an explicit scheme_name pointing at a manually-created "
+                "DeviceAddressScheme instead.", status=400,
+            )
+        scheme, _ = DeviceAddressScheme.objects.get_or_create(
+            name=f"promoted_{cap.raw_var_name}",
+            defaults=dict(
+                description=f"Auto-created by promoting capability #{cap.pk} "
+                            f"({cap.raw_var_name}) on {apt.name}.",
+                gvl=gvl,
+                read_var_template=cap.raw_var_name,
+                write_var_template=cap.raw_var_name,
+                plc_type=plc_type,
+                protocol=DeviceAddressScheme.PROTOCOL_ADS,
+            ),
+        )
+
+    device = ApartmentDevice.objects.create(
+        apartment=apt, room=room, device_type=device_type,
+        name=name, address_scheme=scheme,
+    )
+    cap.apartment_device = device
+    cap.save(update_fields=["apartment_device"])
+
+    log_action(request, "promote_capability", apartment=apt,
+               capability_id=cap.pk, raw_var_name=cap.raw_var_name, device_id=device.pk)
+
+    return _ok(device_id=device.pk, address_scheme=scheme.name, capability=cap.to_dict())

@@ -12,17 +12,21 @@ passing locally against a different DB engine is not the same guarantee.
 
 ## Backend coverage — what's actually tested
 
-`find_device/tests.py` (2239 lines, 24 `TestCase` classes as of the
-2026-08-24 audit) covers: auth gating, tenant isolation, DB-driven device
+`find_device/tests.py` (26 `TestCase` classes, 162 tests as of the
+2026-08-24 Phase 4 work) covers: auth gating, tenant isolation, DB-driven device
 registry construction, security endpoints, device-management permissions,
 general permission enforcement, session management, apartment selector,
 network discovery, registration lockdown, user management, apartment
 management, PLC device assignment, room/device layout, the map API,
 curtain-motor GVL translation, Modbus-fallback registry behavior, PLC
 heartbeat/alerting, relabel permission/output/input flows, building-owner
-scoping, and automation API + execution. This is genuinely substantial —
-when adding a new backend feature, look for the closest existing
-`TestCase` class first; there's a good chance the pattern you need (minting
+scoping, automation API + execution, the `DeviceAddressScheme`/
+`TemplatedDevice` data-driven addressing path (including a real read/write
+round-trip through the registry in mock mode, and that a malformed template
+fails loud rather than silently addressing the wrong variable), and the
+SuperScan-capability-to-managed-device promote endpoint. This is genuinely
+substantial — when adding a new backend feature, look for the closest
+existing `TestCase` class first; there's a good chance the pattern you need (minting
 a JWT for a given role, building a test apartment/device fixture) already
 exists there.
 

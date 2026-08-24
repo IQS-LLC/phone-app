@@ -97,10 +97,19 @@ class ADSClient:
     _ROUTE_REPAIR_COOLDOWN = 600.0
     _last_route_repair_attempt = 0.0
 
-    def __init__(self, netid: str, ip: str, mock: bool = False):
+    def __init__(self, netid: str, ip: str, mock: bool = False, ads_port: int = None):
         self.netid = netid
         self.ip    = ip
         self.mock  = mock
+        # Defaults to the TC3 PLC runtime port. PLCDevice.ads_port has always
+        # been settable in the DB (defaults to 851, the same value as
+        # pyads.PORT_TC3PLC1) but this class silently ignored it until
+        # 2026-08-24 — every real deployment happened to use the default, so
+        # nothing was ever observed to break, but a PLC configured with a
+        # non-default runtime port would have connected via the discovery
+        # scanner (which always honored PLCDevice.ads_port) while this class
+        # kept trying the wrong port. See docs/AUDIT_FINDINGS.md §1.
+        self.ads_port = ads_port if ads_port is not None else pyads.PORT_TC3PLC1
 
         self._conn:   Optional[pyads.Connection] = None
         self._lock    = threading.RLock()
@@ -197,7 +206,7 @@ class ADSClient:
         see connect(). Only the final publish step is locked.
         """
         try:
-            conn = pyads.Connection(self.netid, pyads.PORT_TC3PLC1, self.ip)
+            conn = pyads.Connection(self.netid, self.ads_port, self.ip)
             conn.open()
             conn.read_state()
             with self._lock:

@@ -35,7 +35,7 @@ from .ads_notifications import NotificationManager
 from .devices import (
     DaliChannel, WallRelay, SwitchInput,
     CurtainMotor, ApplianceRelay, NamedRelay, NamedSwitchInput,
-    MagneticSensor, MotionSensor, SecurityController,
+    MagneticSensor, MotionSensor, SecurityController, TemplatedDevice,
     pct_to_byte, byte_to_pct,
 )
 
@@ -95,6 +95,12 @@ class DeviceRegistry:
         self._window_sensors: Dict[int, MagneticSensor]  = {}
         self._motion_sensors: Dict[int, MotionSensor]    = {}
         self._security:       Optional[SecurityController] = None
+        # Keyed by ApartmentDevice.pk, not channel/gvl_name like the dicts
+        # above — a templated device's identity is its DB row, since its
+        # addressing came from a DeviceAddressScheme rather than a
+        # channel-number convention any two templated devices are
+        # guaranteed to share. See devices.TemplatedDevice.
+        self._templated:      Dict[int, TemplatedDevice] = {}
         self._lock    = threading.RLock()
         self._started = False
 
@@ -142,8 +148,9 @@ class DeviceRegistry:
         if not self._client.mock and apartment is not None:
             device = getattr(apartment, 'plc_device', None) or PLCDevice.objects.filter(is_default=True).first()
             if device is not None:
-                self._client.netid = device.ams_net_id
-                self._client.ip    = device.ip_address
+                self._client.netid    = device.ams_net_id
+                self._client.ip       = device.ip_address
+                self._client.ads_port = device.ads_port
                 if self._modbus is not None:
                     self._modbus.ip = device.ip_address
                 logger.info(
@@ -176,9 +183,19 @@ class DeviceRegistry:
                 )
 
         if apartment is not None:
-            for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room'):
+            for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room', 'address_scheme'):
                 room_name = d.room.name if d.room else 'Unassigned'
-                if d.device_type == ApartmentDevice.TYPE_DALI:
+                if d.address_scheme_id is not None:
+                    # Takes priority over device_type below regardless of
+                    # what device_type this row happens to be classified
+                    # as — a scheme means "address this one via
+                    # DeviceAddressScheme, not the hardcoded class for its
+                    # type." See models.DeviceAddressScheme's docstring.
+                    self.add_templated(apartment_device_id=d.pk,
+                                       channel_or_index=d.channel_or_index,
+                                       gvl_name=d.gvl_name, name=d.name,
+                                       room=room_name, scheme=d.address_scheme)
+                elif d.device_type == ApartmentDevice.TYPE_DALI:
                     self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name,
                                   apartment_device_id=d.pk)
                 elif d.device_type == ApartmentDevice.TYPE_RELAY:
@@ -209,13 +226,13 @@ class DeviceRegistry:
         logger.info(
             "DeviceRegistry[apt%s] ready: %d DALI, %d relays, %d curtains, "
             "%d switches, %d door, %d window, %d motion, %d appliances, "
-            "%d toggles, %d named switches  mock=%s",
+            "%d toggles, %d named switches, %d templated  mock=%s",
             self.apartment_id,
             len(self._dali), len(self._relays), len(self._curtains),
             len(self._switches), len(self._door_sensors),
             len(self._window_sensors), len(self._motion_sensors),
             len(self._appliances), len(self._toggles),
-            len(self._named_switches), self._client.mock,
+            len(self._named_switches), len(self._templated), self._client.mock,
         )
 
         self._load_automations()
@@ -336,6 +353,14 @@ class DeviceRegistry:
         with self._lock:
             self._dali[channel] = DaliChannel(channel, name, room, self._client,
                                               apartment_device_id=apartment_device_id)
+
+    def add_templated(self, apartment_device_id: int, channel_or_index: Optional[int],
+                       gvl_name: str, name: str, room: str, scheme):
+        with self._lock:
+            self._templated[apartment_device_id] = TemplatedDevice(
+                apartment_device_id, channel_or_index, gvl_name, name, room,
+                self._client, scheme,
+            )
 
     def fade_dali(self, channel: int, target_percent: int, duration_ms: int) -> bool:
         """
@@ -545,6 +570,7 @@ class DeviceRegistry:
     def door_sensor(self, index: int)  -> Optional[MagneticSensor]:  return self._door_sensors.get(index)
     def window_sensor(self, index: int)-> Optional[MagneticSensor]:  return self._window_sensors.get(index)
     def motion_sensor(self, index: int)-> Optional[MotionSensor]:    return self._motion_sensors.get(index)
+    def templated(self, apartment_device_id: int) -> Optional[TemplatedDevice]: return self._templated.get(apartment_device_id)
 
     def security(self)            -> Optional[SecurityController]: return self._security
     def all_dali(self)            -> List[DaliChannel]:     return list(self._dali.values())
@@ -557,6 +583,7 @@ class DeviceRegistry:
     def all_door_sensors(self)    -> List[MagneticSensor]:  return list(self._door_sensors.values())
     def all_window_sensors(self)  -> List[MagneticSensor]:  return list(self._window_sensors.values())
     def all_motion_sensors(self)  -> List[MotionSensor]:    return list(self._motion_sensors.values())
+    def all_templated(self)       -> List[TemplatedDevice]: return list(self._templated.values())
 
     def rooms(self) -> List[str]:
         seen, result = set(), []

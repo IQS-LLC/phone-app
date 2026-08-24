@@ -1,5 +1,14 @@
 # Django-side status for this proposal
 
+> **Superseded for relays, 2026-08-24 — see `docs/plc_proposals/README.md`'s
+> top note.** Everything below describes `WallRelay` targeting the
+> `bPyRelayCmd`/`bPyRelaySet` variables from *this* proposal, which was
+> reverted and never deployed. `WallRelay` was later repointed at a
+> different, isolated `gvlController` bridge instead, which *is* live —
+> see `find_device/plc/devices.py`'s current `WallRelay` docstring. Kept
+> here for the historical record of what was tried first and why it didn't
+> ship this way.
+
 Already done (safe regardless of whether the PLC change is ever deployed):
 
 - `find_device/plc/devices.py` — `WallRelay._var_state` now reads

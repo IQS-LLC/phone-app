@@ -15,7 +15,8 @@ from django.utils import timezone
 
 from find_device.models import (
     Apartment, ApartmentDevice, ApartmentMembership, AutomationRule,
-    BuildingMembership, PLCDevice, Role, Room, TemporaryAccess,
+    BuildingMembership, DeviceAddressScheme, DiscoveredCapability,
+    PLCDevice, Role, Room, TemporaryAccess,
 )
 from find_device.plc.devices import CurtainMotor
 from find_device.plc.registry import DeviceRegistry
@@ -137,6 +138,179 @@ class DeviceRegistryDbDrivenTests(TestCase):
         apt = Apartment.objects.get(name="Apartment 16")
         registry = DeviceRegistry.for_apartment(apt.pk)
         self.assertIsNone(registry.security())
+
+
+class DeviceAddressSchemeTests(TestCase):
+    """
+    DeviceAddressScheme / TemplatedDevice — the data-driven GVL addressing
+    layer added 2026-08-24 (see docs/plc-integration.md and
+    docs/AUDIT_FINDINGS.md §1 for why: adding a new GVL layout used to mean
+    writing a new Python class in devices.py).
+
+    Uses a brand-new Apartment rather than "Apartment 16"/"Apartment 8" —
+    DeviceRegistry caches one instance per apartment_id for the life of the
+    process (DeviceRegistry._apt_instances), and other test classes in this
+    file already call DeviceRegistry.for_apartment() for those two
+    apartments, which would leave a stale, already-_started registry that
+    silently ignores any ApartmentDevice row created after it started. A
+    fresh apartment guarantees a fresh, never-started registry.
+    """
+
+    def setUp(self):
+        # DeviceRegistry._apt_instances is a process-level cache keyed by
+        # apartment_id, not reset by TestCase's per-test transaction
+        # rollback — and sqlite (the local/test DB) reuses primary keys
+        # once a transaction that inserted them rolls back, so two test
+        # methods creating "a fresh Apartment" can end up with the SAME
+        # apartment_id and collide on an already-_started registry from a
+        # prior test. Clearing the cache is the same thing production code
+        # never needs to do (a real process's apartment_ids don't get
+        # reused this way) — this is a test-isolation fix, not evidence of
+        # a production bug.
+        DeviceRegistry._apt_instances.clear()
+        self.apartment = Apartment.objects.create(name="Templated Test Apartment")
+        self.scheme = DeviceAddressScheme.objects.create(
+            name="test_scheme_v1",
+            gvl="gvlTest",
+            read_var_template="{gvl}.aLevel[{index}]",
+            write_var_template="{gvl}.aLevel[{index}]",
+            commit_var_template="{gvl}.bSet[{index}]",
+            index_offset=0,
+            plc_type="BYTE",
+            protocol=DeviceAddressScheme.PROTOCOL_ADS,
+            widget_type="dali_slider",
+        )
+
+    def test_device_with_scheme_round_trips_through_templated_device_in_mock_mode(self):
+        device = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=5, name="Test Light", address_scheme=self.scheme,
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        templated = registry.templated(device.pk)
+        self.assertIsNotNone(templated)
+
+        templated.write(88)
+        self.assertEqual(templated.read(), 88)
+
+    def test_device_with_scheme_is_not_also_built_as_the_hardcoded_class(self):
+        device = ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=5, name="Test Light", address_scheme=self.scheme,
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        # A scheme takes priority over device_type entirely (see
+        # registry.DeviceRegistry._start()) — this row must NOT also end up
+        # in the hardcoded DALI dict, or a caller using the old dali()
+        # accessor would find a device whose addressing doesn't match what
+        # DaliChannel assumes.
+        self.assertIsNone(registry.dali(5))
+        self.assertIsNotNone(registry.templated(device.pk))
+
+    def test_device_without_scheme_still_uses_the_hardcoded_class(self):
+        ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=5, name="Plain Light",
+        )
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        self.assertIsNotNone(registry.dali(5))
+        self.assertEqual(len(registry.all_templated()), 0)
+
+    def test_malformed_template_fails_loud_not_silently_wrong(self):
+        bad_scheme = DeviceAddressScheme.objects.create(
+            name="bad_scheme_v1", gvl="gvlTest",
+            read_var_template="{gvl}.aLevel[{not_a_real_placeholder}]",
+            plc_type="BYTE",
+        )
+        ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_DALI,
+            channel_or_index=1, name="Broken Light", address_scheme=bad_scheme,
+        )
+        with self.assertRaises(KeyError):
+            DeviceRegistry.for_apartment(self.apartment.pk)
+
+
+class PromoteCapabilityTests(TestCase):
+    """
+    POST /superscan/<apt>/capabilities/<cap>/promote/ — the bridge from a
+    SuperScan-discovered symbol to a real, controllable ApartmentDevice
+    (see superscan_views.promote_capability's docstring and
+    docs/AUDIT_FINDINGS.md §1 for why this exists).
+    """
+
+    def setUp(self):
+        DeviceRegistry._apt_instances.clear()
+        self.apartment = Apartment.objects.create(name="Promote Test Apartment")
+        self.staff = User.objects.create_user(username="promote_staff", password="pw12345", is_staff=True)
+        self.resident = User.objects.create_user(username="promote_resident", password="pw12345")
+        ApartmentMembership.objects.create(
+            user=self.resident, apartment=self.apartment,
+            role=ApartmentMembership.ROLE_RESIDENT, is_default=True,
+        )
+        self.cap = DiscoveredCapability.objects.create(
+            apartment=self.apartment, device_type="unknown_symbol",
+            identifier="gvlTest.bSomeSwitch", raw_var_name="gvlTest.bSomeSwitch",
+            data_type="BOOL", is_known_type=False,
+        )
+
+    def _token(self, username):
+        return self.client.post(
+            "/auth/login/", {"username": username, "password": "pw12345"},
+        ).json()["access"]
+
+    def test_staff_can_promote_a_discovered_capability(self):
+        token = self._token("promote_staff")
+        resp = self.client.post(
+            f"/superscan/{self.apartment.pk}/capabilities/{self.cap.pk}/promote/",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        device_id = body["device_id"]
+
+        device = ApartmentDevice.objects.get(pk=device_id)
+        self.assertEqual(device.apartment_id, self.apartment.pk)
+        self.assertIsNotNone(device.address_scheme_id)
+        self.assertEqual(device.address_scheme.gvl, "gvlTest")
+        self.assertEqual(device.address_scheme.read_var_template, "gvlTest.bSomeSwitch")
+
+        self.cap.refresh_from_db()
+        self.assertEqual(self.cap.apartment_device_id, device_id)
+
+        # The promoted device must actually be controllable through the
+        # normal registry path, not just exist as a DB row.
+        registry = DeviceRegistry.for_apartment(self.apartment.pk)
+        templated = registry.templated(device_id)
+        self.assertIsNotNone(templated)
+        templated.write(True)
+        self.assertEqual(templated.read(), True)
+
+    def test_resident_cannot_promote(self):
+        token = self._token("promote_resident")
+        resp = self.client.post(
+            f"/superscan/{self.apartment.pk}/capabilities/{self.cap.pk}/promote/",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cannot_promote_the_same_capability_twice(self):
+        token = self._token("promote_staff")
+        first = self.client.post(
+            f"/superscan/{self.apartment.pk}/capabilities/{self.cap.pk}/promote/",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(first.status_code, 200, first.content)
+
+        second = self.client.post(
+            f"/superscan/{self.apartment.pk}/capabilities/{self.cap.pk}/promote/",
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+        self.assertEqual(second.status_code, 409)
 
 
 class SecurityEndpointTests(TestCase):
