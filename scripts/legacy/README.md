@@ -12,7 +12,7 @@ Kept here for reference rather than deleted outright, in case anything still
 shells out to them. If nothing has referenced them after a few months, they
 can be deleted for good.
 
-## Also archived here (2026-08-24 audit): `deploy.sh`, `auto_deploy.sh`, `Dockerfile.single`, `run.sh`
+## Also archived here (2026-08-24 audit): `deploy.sh`, `auto_deploy.sh`, `Dockerfile.single`, `run.sh`, `config.env`
 
 These three are part of the repo's original scaffold commit (`d6ea612
 "initial demo push"`, a different author than the project's actual

@@ -28,6 +28,13 @@ logs/
 .env
 .env.*
 !.env.example
+# Also catch a differently-named env file (e.g. config.env) — found one
+# committed to the repo's original scaffold commit 2026-08-24 (no real
+# secrets in it, but the *.env glob below was missing, so a filename that
+# doesn't start with a literal dot wasn't excluded at all). See
+# docs/AUDIT_FINDINGS.md.
+*.env
+!.env.example
 
 # Test / coverage
 .coverage
