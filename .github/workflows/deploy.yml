@@ -6,6 +6,9 @@
 # ────
 #  push to main / AI-ed branch
 #    1. test          Django tests against real Postgres
+#    1b. flutter-test Flutter unit tests (flutter_application_plc/test/) —
+#                     gates 3/4 below, added 2026-08-24 alongside the first
+#                     real test files, see docs/testing.md
 #    2. build         Django image → docker.io/<DOCKERHUB_USERNAME>/lugh-django
 #    3. android       Signed release APK uploaded as artifact
 #    4. ios           Unsigned IPA uploaded as artifact (sideload via AltStore/Sideloadly)
@@ -38,22 +41,12 @@
 #
 # One-time server setup (run once manually, then CI takes over)
 # ─────────────────────
-#  # Install k3s
-#  curl -sfL https://get.k3s.io | sh -
-#
-#  # Install Helm
-#  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-#
-#  # Create namespace + secrets (NEVER put real values in this file)
-#  kubectl create namespace lugh
-#  kubectl create secret generic lugh-secrets -n lugh \
-#    --from-literal=SECRET_KEY='<generate with python -c "import secrets; print(secrets.token_urlsafe(50))">' \
-#    --from-literal=DB_PASSWORD='<strong-password>' \
-#    --from-literal=POSTGRES_PASSWORD='<same-strong-password>' \
-#    --from-literal=INTERNAL_API_KEY='<random>'
-#
-#  # Add the Beckhoff AMS route (on the PLC side — TwinCAT System Manager)
-#  # Add a static route entry pointing to 192.168.0.192 (server IP)
+#  The k3s/Helm setup this section used to describe is confirmed dead —
+#  see infra_legacy_k3s/README.md and docs/AUDIT_FINDINGS.md. The real,
+#  current production deployment is the NAS + Docker Compose + Cloudflare
+#  Tunnel setup in docs/deployment.md; step 5 (deploy) above targets that
+#  via the self-hosted runner, not k3s. Set up a new server by following
+#  docs/deployment.md, not by running kubectl/helm commands.
 # =============================================================================
 
 name: CI/CD
@@ -132,6 +125,33 @@ jobs:
           python manage.py test --verbosity=2
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1b. Flutter tests — added 2026-08-24 alongside the first real test files
+#     under flutter_application_plc/test/ (see docs/testing.md). Runs before
+#     build-android/build-ios so a broken test fails fast instead of only
+#     surfacing after a multi-minute app build.
+# ─────────────────────────────────────────────────────────────────────────────
+  flutter-test:
+    name: Flutter Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.x"
+          cache: true
+
+      - name: Flutter pub get
+        working-directory: flutter_application_plc
+        run: flutter pub get
+
+      - name: Flutter test
+        working-directory: flutter_application_plc
+        run: flutter test
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. Build & Push Django Docker image → GHCR
 # ─────────────────────────────────────────────────────────────────────────────
   build-backend:
@@ -186,7 +206,7 @@ jobs:
   build-android:
     name: Build Android APK
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, flutter-test]
     if: github.event_name == 'push'
     # Needed for the rolling-release publish step below (creates/updates a
     # release+tag via the default GITHUB_TOKEN).
@@ -285,7 +305,7 @@ jobs:
   build-ios:
     name: Build iOS IPA
     runs-on: macos-latest
-    needs: test
+    needs: [test, flutter-test]
     if: github.event_name == 'push'
     # Needed for the rolling-release publish step below (creates/updates a
     # release+tag via the default GITHUB_TOKEN).
