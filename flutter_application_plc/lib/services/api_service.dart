@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -187,7 +188,7 @@ class ApiService {
     }
 
     sw.stop();
-    return _exceptionToResult(lastEx, sw.elapsedMilliseconds);
+    return exceptionToResult(lastEx, sw.elapsedMilliseconds);
   }
 
   // ── POST (no retry — command semantics, except a single 401 refresh) ───────
@@ -219,13 +220,13 @@ class ApiService {
       return _parseResponse(response, sw.elapsedMilliseconds);
     } on SocketException catch (e) {
       sw.stop();
-      return _exceptionToResult(e, sw.elapsedMilliseconds);
+      return exceptionToResult(e, sw.elapsedMilliseconds);
     } on TimeoutException catch (e) {
       sw.stop();
-      return _exceptionToResult(e, sw.elapsedMilliseconds);
+      return exceptionToResult(e, sw.elapsedMilliseconds);
     } catch (e) {
       sw.stop();
-      return _exceptionToResult(e, sw.elapsedMilliseconds);
+      return exceptionToResult(e, sw.elapsedMilliseconds);
     }
   }
 
@@ -364,7 +365,14 @@ class ApiService {
     }
   }
 
-  static ApiResult<Map<String, dynamic>> _exceptionToResult(
+  // Made public (was _exceptionToResult) and marked @visibleForTesting
+  // 2026-08-24 so this classification — the exact logic
+  // RuntimeConfig.reportOutcome's failover decisions depend on being
+  // correct — can be unit-tested directly. See test/services/
+  // api_service_test.dart. No behavior change: still only called from
+  // within this class.
+  @visibleForTesting
+  static ApiResult<Map<String, dynamic>> exceptionToResult(
     Object? e, int ms,
   ) {
     if (e is SocketException) {

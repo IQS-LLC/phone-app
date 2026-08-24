@@ -36,37 +36,61 @@ permissions/DB/registry-construction; this specific low-level retry
 behavior hasn't been independently verified by a dedicated test as of this
 writing.
 
-## Frontend (Flutter) — currently zero coverage
+## Frontend (Flutter) — was zero coverage; now covers the two highest-risk pieces
 
-`flutter_application_plc/test/` has no files. This matters concretely: a
-real, serious bug (the multi-endpoint failover system hammering a dead
-tunnel pool every 1-3 seconds — see `docs/AUDIT_FINDINGS.md`) was found only
-through manual live testing on an emulator, not by any automated check.
+`flutter_application_plc/test/` had no files until 2026-08-24. A real,
+serious bug (the multi-endpoint failover system hammering a dead tunnel
+pool every 1-3 seconds — see `docs/AUDIT_FINDINGS.md`) was found only
+through manual live testing on an emulator, not by any automated check —
+that's what prompted closing this gap.
 
-**Priority order for adding coverage** (all pure state-machine logic, no
-widget-rendering dependency — cheap to unit-test with plain `flutter_test`,
-already a pubspec dependency):
+**Done:**
 
-1. **`lib/config/runtime_config.dart`** — the endpoint-pool failover state
-   machine. Test: circuit breaker opening after 3 consecutive failures,
-   exponential backoff's jitter bounds, endpoint-selection order (including
-   the "every endpoint down" fallback), the sticky reclaim-after-N-probes
-   behavior, and — the single most important one — `reportOutcome`'s
-   classification of which error types count as an endpoint-health signal
-   (a 401/403/429 must never trigger failover; a network/timeout/5xx
-   always should). Getting this classification wrong silently breaks
-   failover in a way that's easy to miss in manual testing.
-2. **`lib/state/app_state.dart`** — the stale-response-discard guard
-   (`requestVersion != _config.version`). This exact bug class has recurred
-   multiple times in this project's git history; a test that proves a
-   response arriving after a config-version bump gets discarded (not
-   applied) would catch a regression before it ships.
-3. **`lib/services/api_service.dart`** — the exception-to-error-code
-   mapping that `RuntimeConfig.reportOutcome` depends on for correct
-   failover decisions.
+1. **`test/config/runtime_config_test.dart`** (15 tests) — the endpoint-pool
+   failover state machine: circuit breaker opening after 3 consecutive
+   failures (and *not* after 2), `reportOutcome`'s classification of which
+   error types count as an endpoint-health signal (confirmed: a
+   401/403/429-class `clientError` never trips the breaker even after 10
+   failures; `network`/`timeout`/`serverError` always do after 3),
+   automatic promotion to the next healthy endpoint with a single `version`
+   bump, the "every endpoint down" fallback (confirmed `serverUrl` stays a
+   real pool member and `activeEndpointCoolingDown` flips true — the exact
+   flag that gates `AppState`'s poller and prevents the hammering bug from
+   recurring), and the sticky reclaim-after-3-probes behavior (confirmed
+   one clean report does *not* reclaim, three consecutive ones do).
+2. **`test/services/api_service_test.dart`** (6 tests) — the
+   exception-to-`ApiErrorCode` classification `RuntimeConfig.reportOutcome`
+   depends on for correct failover decisions: `SocketException`→`network`,
+   `TimeoutException`→`timeout`, `FormatException`→`parseError`, an
+   unrecognized exception→`unknown` with a safe generic message (and
+   specifically confirms raw exception text — the 2026-08-20 regression —
+   never leaks into the user-facing string), and that a `null` exception
+   doesn't crash. Required making `ApiService._exceptionToResult` public as
+   `exceptionToResult` with `@visibleForTesting` (no behavior change — see
+   its doc comment) since it was a private pure function with no other
+   testable seam.
 
-Use `shared_preferences`'s test-mode in-memory implementation and a fake
-`http.Client` — no new dependencies needed to start on any of the above.
+**Deliberately not done, and why**: `AppState`'s stale-response-discard
+guard (`requestVersion != _config.version` in `_doPoll()`) is real,
+important, and has recurred as a bug class multiple times in this
+project's git history — but `AppState` constructs its own `ApiService`
+internally rather than accepting an injectable one, and `ApiService` itself
+calls the top-level `http.get`/`http.post` rather than an injectable
+`http.Client`. Testing the actual race (a response arriving *after* a
+version bump gets discarded) deterministically would need either a real
+network call with unpredictable timing, or adding dependency injection to
+already-hardened, live-verified polling code — a production refactor
+beyond "add tests for existing behavior." The guard itself is simple, has
+been read and verified by hand, and is exercised implicitly by live testing
+every time a tunnel fails over mid-poll (this project has done that
+repeatedly this session). If `AppState` ever gains an injectable API layer
+for other reasons, add this test then — don't add the seam solely to
+enable it.
+
+Both new test files use `shared_preferences`'s test-mode in-memory
+implementation (`SharedPreferences.setMockInitialValues`) — no new
+dependencies were needed. Run them with `flutter test` from
+`flutter_application_plc/`.
 
 ## Before calling anything "done"
 
