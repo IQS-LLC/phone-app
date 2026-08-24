@@ -8,7 +8,7 @@ Residents control lights, relays, curtains, and climate. Tech team staff commiss
 
 **GitHub repo:** `IQS-LLC/phone-app` (private)  
 **Docker Hub image:** `shara-a/lugh-django:latest`  
-**Deployment manual:** `docs/DEPLOYMENT_MANUAL.md`
+**Docs entry point:** `README.md` → `docs/architecture.md`, `docs/deployment.md`, `docs/plc-integration.md`, `docs/admin-access.md`
 
 ---
 
@@ -68,7 +68,7 @@ TECH TEAM badge). All role checks are on the backend; never rely on what the Flu
 ## IP Addresses and Where to Change Them
 
 All network values are placeholders in this repo. Every hardcoded example IP must be replaced.
-See `docs/DEPLOYMENT_MANUAL.md` → "FILL THIS IN BEFORE YOU START" for the complete per-file,
+See `docs/deployment.md` → "Fill this in before you start" for the complete per-file,
 per-line reference. Summary:
 
 | Value | Files that contain it | How to change |
@@ -107,7 +107,7 @@ per-line reference. Summary:
 | `lugh-startup.ps1` | Windows dev PC auto-start script |
 | `setup-permanent-tunnel.ps1` | Cloudflare permanent tunnel setup |
 | `.github/workflows/deploy.yml` | CI/CD — test → build → android → ios → deploy |
-| `docs/DEPLOYMENT_MANUAL.md` | Complete installation and commissioning manual |
+| `docs/deployment.md`, `docs/architecture.md`, `docs/plc-integration.md`, `docs/commissioning.md`, `docs/operations.md`, `docs/troubleshooting.md` | Installation, architecture, PLC integration, commissioning, day-2 ops, troubleshooting (was one `DEPLOYMENT_MANUAL.md`, split 2026-08-24 — see `docs/DEPLOYMENT_MANUAL.md` for the redirect map) |
 
 ---
 

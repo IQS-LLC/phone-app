@@ -116,10 +116,15 @@ $Cfg = @{
     ArtifactsDir     = if ($env:ARTIFACTS_DIR)      { $env:ARTIFACTS_DIR }     else { "C:\ProgramData\Lugh\artifacts" }
     DesktopDir       = if ($env:DESKTOP_DIR)        { $env:DESKTOP_DIR }       else { "C:\Users\Automation\Desktop" }
 
-    # Helm
+    # Helm — targets the archived k3s/Helm chart (confirmed dead/unmaintained
+    # scaffolding, 2026-08-24 audit; see infra_legacy_k3s\README.md). Only
+    # exercised when -HelmDeploy/$env:HELM_DEPLOY is set, and already skips
+    # gracefully if kubectl/helm/a cluster aren't available. Path updated so
+    # it doesn't silently point at a location that no longer exists, not
+    # because this deploy target is expected to be used.
     HelmRelease      = if ($env:HELM_RELEASE)       { $env:HELM_RELEASE }      else { "lugh" }
     HelmNamespace    = if ($env:HELM_NAMESPACE)      { $env:HELM_NAMESPACE }    else { "lugh" }
-    HelmChart        = if ($env:HELM_CHART)          { $env:HELM_CHART }        else { "infra\helm\lugh" }
+    HelmChart        = if ($env:HELM_CHART)          { $env:HELM_CHART }        else { "infra_legacy_k3s\helm\lugh" }
     HelmValues       = if ($env:HELM_VALUES)         { $env:HELM_VALUES }       else { "" }
     HelmTimeout      = if ($env:HELM_WAIT_TIMEOUT)   { $env:HELM_WAIT_TIMEOUT } else { "300" }
 

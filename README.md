@@ -9,10 +9,15 @@ Android and iOS.
 
 | I want to... | Read |
 |---|---|
-| Understand the architecture | [`docs/DEPLOYMENT_MANUAL.md`](docs/DEPLOYMENT_MANUAL.md) §1 (being split into `docs/architecture.md`) |
-| Deploy to production | [`docs/DEPLOYMENT_MANUAL.md`](docs/DEPLOYMENT_MANUAL.md) |
+| Understand the architecture | [`docs/architecture.md`](docs/architecture.md) |
+| Deploy to production | [`docs/deployment.md`](docs/deployment.md) |
 | Set up a local dev environment (no PLC hardware needed) | [`docs/dev-environment.md`](docs/dev-environment.md) |
-| Understand PLC/GVL integration and device compatibility | [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) §1, `docs/plc-integration.md` (in progress) |
+| Understand PLC/GVL integration and device compatibility | [`docs/plc-integration.md`](docs/plc-integration.md) |
+| Commission a new apartment | [`docs/commissioning.md`](docs/commissioning.md) |
+| Run day-2 operations (backups, rollback, replacing hardware) | [`docs/operations.md`](docs/operations.md) |
+| Fix something that's broken | [`docs/troubleshooting.md`](docs/troubleshooting.md) |
+| Get/understand privileged access (admin, CI, dev) | [`docs/admin-access.md`](docs/admin-access.md) |
+| Run or add tests | [`docs/testing.md`](docs/testing.md) |
 | Get an AI coding assistant up to speed fast | [`CLAUDE.md`](CLAUDE.md) |
 | Find a past architectural decision or known issue | [`docs/AUDIT_FINDINGS.md`](docs/AUDIT_FINDINGS.md) |
 

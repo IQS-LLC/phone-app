@@ -29,8 +29,8 @@
 #    HELM_DEPLOY=true bash gogogo222.sh          # enable Helm deploy step
 #    HELM_RELEASE=lugh                           # Helm release name (default: lugh)
 #    HELM_NAMESPACE=lugh                         # k8s namespace  (default: lugh)
-#    HELM_CHART=infra/helm/lugh                  # chart path relative to project dir
-#    HELM_VALUES=infra/helm/lugh/values.prod.yaml  # optional extra values file
+#    HELM_CHART=infra_legacy_k3s/helm/lugh                  # chart path relative to project dir
+#    HELM_VALUES=infra_legacy_k3s/helm/lugh/values.prod.yaml  # optional extra values file
 #    HELM_WAIT_TIMEOUT=300                       # seconds to wait for rollout
 #
 #  Logs:
@@ -822,7 +822,7 @@ step_download_artifacts() {
 #   HELM_DEPLOY=true         enable this step
 #   HELM_RELEASE=lugh        Helm release name (default: lugh)
 #   HELM_NAMESPACE=lugh      k8s namespace (default: lugh)
-#   HELM_CHART=infra/helm/lugh  path to chart directory (relative to PROJECT_DIR)
+#   HELM_CHART=infra_legacy_k3s/helm/lugh  path to chart directory (relative to PROJECT_DIR)
 #   HELM_VALUES=             path to extra values file (optional)
 #   KUBECONFIG               path to kubeconfig (default: ~/.kube/config)
 #   HELM_WAIT_TIMEOUT=300    seconds to wait for rollout (default: 300)
@@ -858,7 +858,7 @@ step_helm_deploy() {
     # ── Config ─────────────────────────────────────────────────────────────
     local release="${HELM_RELEASE:-lugh}"
     local namespace="${HELM_NAMESPACE:-lugh}"
-    local chart="${HELM_CHART:-infra/helm/lugh}"
+    local chart="${HELM_CHART:-infra_legacy_k3s/helm/lugh}"
     local values_file="${HELM_VALUES:-}"
     local timeout="${HELM_WAIT_TIMEOUT:-300}"
 
@@ -907,7 +907,7 @@ step_helm_deploy() {
         cmd+=(--set "env.LUGH_SERVER_URL=${TUNNEL_URL}")
     fi
 
-    # Extra values file (e.g. infra/helm/lugh/values.prod.yaml)
+    # Extra values file (e.g. infra_legacy_k3s/helm/lugh/values.prod.yaml)
     if [ -n "$values_file" ] && [ -f "$values_file" ]; then
         cmd+=(-f "$values_file")
         log_data "Extra values: ${values_file}"

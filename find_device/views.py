@@ -327,8 +327,8 @@ def get_diagnostics(request):
 # no duplicate command, and no stuck state.
 #
 # This determinism depends on staying at one worker / one replica — see the
-# warning on WEB_CONCURRENCY in infra/helm/lugh/values.yaml and CLAUDE.md's
-# "Critical Architecture Constraints" before ever changing it.
+# WEB_CONCURRENCY=1 setting in Dockerfile and docker-compose.prod.yml, and
+# CLAUDE.md's "Critical Architecture Constraints", before ever changing it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
