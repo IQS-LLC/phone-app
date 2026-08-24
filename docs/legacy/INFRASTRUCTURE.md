@@ -1,5 +1,14 @@
 # Lugh by IQS — Production Infrastructure
 
+> **Superseded, 2026-08-24 — do not use.** This document describes a k3s/Helm
+> deployment that the project owner has confirmed was never actually put into
+> production and is not maintained. The real, current production deployment
+> is NAS + Docker Compose + Cloudflare Tunnel — see `CLAUDE.md` and
+> `docs/DEPLOYMENT_MANUAL.md` (soon `docs/deployment.md`) for the accurate,
+> current architecture. The matching Helm chart/scripts live at
+> `infra_legacy_k3s/` with the same status note. Kept here for historical
+> reference only.
+
 ## Architecture Overview
 
 ```

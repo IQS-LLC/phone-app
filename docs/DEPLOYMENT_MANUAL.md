@@ -910,16 +910,14 @@ The `.1.1` suffix is the TwinCAT default for the local AMS Net ID of any target.
 
 ### 7.6 PLC Variable Naming Convention
 
-Variables are accessed by name (e.g. `gvlDALI.channel_01`). Your TwinCAT GVL must use these conventions:
-
-| GVL | Variable Type | Controls |
-|---|---|---|
-| `gvlDALI` | `BYTE` | DALI light channels (0–100 = brightness %) |
-| `gvlRelays` | `BOOL` | Wall relays |
-| `gvlHVAC` | `REAL` / `BOOL` | Climate setpoints and states |
-| `gvlAlarms` | `BOOL` | Alarm inputs |
-| `gvlSensor` | `BOOL` / `REAL` | Door, window, motion sensors |
-| `gvlMotor` | `INT` | Curtain motor commands (0=stop, 1=up, 2=down) |
+There is no single fixed GVL naming convention enforced by the code — the
+live control path (`find_device/plc/devices.py`) and the SuperScan discovery
+classifier (`find_device/discovery/classifier.py`) each have their own GVL
+vocabulary today, and the two don't currently agree with each other (audited
+2026-08-24, see `docs/AUDIT_FINDINGS.md` §1). See `docs/plc-integration.md`
+for the current, real GVL layout and the plan to make it per-apartment
+configurable instead of hardcoded. Do not restate a naming table here again —
+one drifted out of sync with the code once already.
 
 ---
 
@@ -1363,7 +1361,7 @@ client.disconnect()
 "
 ```
 
-If zero symbols: the TwinCAT GVL does not expose its variables with the expected names (`gvlDALI`, `gvlRelays`, etc.). Verify the GVL naming in the TwinCAT project.
+If zero symbols: the TwinCAT GVL is not exposing any symbols at all, or ADS access is blocked. See `docs/plc-integration.md` for the current expected GVL layout to check against.
 
 ---
 

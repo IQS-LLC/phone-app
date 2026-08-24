@@ -86,12 +86,18 @@ relays). Everything else (switches, sensors, appliances) has no Modbus path.
   `set_room_brightness`, and everything curtain/switch/sensor-related are
   unchanged — ADS-only, no fallback.
 
-**Curtains have no Django integration at all yet**, via ADS or Modbus — the
-existing `CurtainMotor` class models a different, never-wired hardware
-convention (`gvlIO`/`gvlMotor`, INT-based stop/up/down) left over from before
-real curtain hardware existed. `POU_Modbus` correctly exposes the *new*
-`gvlCurtain` button model over Modbus, ready for whenever a matching Django
-device class gets built — that's a separate piece of work, not done here.
+**Correction (2026-08-24 audit):** the paragraph that used to be here claimed
+curtains had no Django integration at all. That was true when this doc was
+first written but is stale now — `find_device/plc/devices.py`'s
+`CurtainMotor` class was retargeted to the real `gvlCurtain`/`POU_Curtain` GVL
+(momentary/held-button model, translated to the existing 0=stop/1=up/2=down
+API contract) and curtains work over ADS today, same as DALI/relays. What's
+actually still missing, and what this doc's scope is limited to, is a
+**Modbus fallback** for curtains — `POU_Modbus` exposes the `gvlCurtain`
+button model over Modbus already, but `registry.py`'s ADS→Modbus fallback
+wrappers only cover DALI 1-16 and relay 1-4; curtains/switches/sensors/
+appliances have no Modbus path yet. See `docs/plc-integration.md` for the
+current, accurate state of ADS vs. Modbus coverage per device type.
 
 **Also not done:** write-fallback for the bulk endpoints (`..._all`,
 `..._room`) — scoped out to keep this change reviewable. Only the

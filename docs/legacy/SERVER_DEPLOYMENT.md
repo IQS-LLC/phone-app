@@ -1,3 +1,10 @@
+> **Superseded, 2026-08-24 — do not use.** From the repo's original scaffold
+> commit (`d6ea612`), never updated since, and describes `deploy.sh` / a
+> generic single-container topology that was never adopted. See
+> `docs/deployment.md` (or `docs/DEPLOYMENT_MANUAL.md` until that split
+> lands) for the current, accurate deployment guide. Kept for historical
+> reference only.
+
 # PLC Project - Server Deployment Guide
 
 ## Overview

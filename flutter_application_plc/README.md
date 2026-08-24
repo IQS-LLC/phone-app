@@ -1,75 +1,58 @@
-# PLC Light Control Demo
+# Lugh — Flutter App
 
-A complete Flutter + Django + PLC automation demo for controlling lights via mobile/web interface.
+The mobile client for Lugh, a smart-building control platform. Talks to the
+Django backend in `../find_device/` over HTTPS/JWT. See the repo root
+[`README.md`](../README.md) and [`docs/`](../docs/) for the full system
+picture — this file covers only what's specific to the Flutter app.
 
-## Architecture
+## Running it
 
-- **Flutter App**: Cross-platform mobile and web interface for light control
-- **Django Backend**: REST API server handling PLC communication
-- **PLC Integration**: Beckhoff TwinCAT 3 PLC with ADS protocol (with mock mode for demo)
+The login screen has no visible server-address field by design (see
+`lib/config/runtime_config.dart`'s doc comment — a deliberate
+anti-phishing decision). The server address is baked in at build/launch time
+via `--dart-define=LUGH_SERVER_URL`, and accepts a comma-separated list (the
+multi-endpoint Cloudflare failover pool used in production).
 
-## Features
+```bash
+flutter pub get
+flutter run --dart-define=LUGH_SERVER_URL=http://127.0.0.1:8000
+```
 
-- Real-time brightness control with circular dimmer
-- Scene presets (Off, Night, Warm, Work, Full)
-- Fade duration settings
-- System status monitoring
-- Activity logging
-- Responsive design for mobile and web
+See [`../docs/dev-environment.md`](../docs/dev-environment.md) for the full
+local-dev walkthrough (no PLC hardware required), including how to run
+against a mock-PLC backend on the same machine.
 
-## Setup & Running
+## Architecture (client side)
 
-### Backend (Django)
+- `lib/config/runtime_config.dart` — the single source of truth for the
+  server URL. Owns the multi-endpoint failover pool: health tracking,
+  circuit breaker, exponential backoff, automatic promotion/reclaim between
+  endpoints. Every other service reads the current URL from here; nothing
+  else is allowed to cache its own copy (see the file's doc comment for the
+  real bug that made this rule necessary).
+- `lib/state/app_state.dart` — the app's live device/connectivity state,
+  polling the backend roughly once a second and reconciling optimistic UI
+  updates against confirmed server state.
+- `lib/auth/` — JWT login/session handling.
+- `lib/services/api_service.dart` — the HTTP layer; classifies every failure
+  into an `ApiErrorCode` that `RuntimeConfig` uses to decide whether an
+  endpoint is unhealthy.
+- `lib/screens/` — one file per screen; `main_shell.dart` is the tab
+  navigation root.
 
-1. Install dependencies:
-   ```bash
-   pip install django django-cors-headers pyads
-   ```
+## Role-based UI
 
-2. Run migrations:
-   ```bash
-   python manage.py migrate
-   ```
+The app shows/hides features based on what the backend's `/auth/` response
+says about the logged-in user (`is_staff`, apartment membership role) — the
+Flutter code never makes its own authorization decisions, it only reflects
+what the backend already decided. See the repo root `CLAUDE.md`'s Role
+System table for the full breakdown.
 
-3. Start server:
-   ```bash
-   python manage.py runserver 0.0.0.0:8000
-   ```
+## Testing
 
-The backend includes mock PLC mode for demo purposes when real PLC is unavailable.
-
-### Frontend (Flutter)
-
-1. Ensure Flutter is installed and configured
-
-2. Update API endpoint in `lib/main.dart`:
-   ```dart
-   const String kBaseUrl = 'http://YOUR_SERVER_IP:8000';
-   ```
-
-3. Run the app:
-   ```bash
-   flutter run
-   ```
-
-## API Endpoints
-
-- `GET /plc/state/` - Get current PLC state
-- `POST /plc/brightness/` - Set brightness (0-100)
-- `POST /plc/fade/` - Set fade duration
-- `GET /plc/` - Health check
-
-## PLC Variables
-
-The system expects these TwinCAT GVL variables:
-- `GVL.nDimLevel` (BYTE): Brightness level 0-254
-- `GVL.nFadeTime` (USINT): Fade time index
-- `GVL.bLightTrigger` (BOOL): Command trigger
-- `GVL.nActualLevel` (BYTE): Current level
-- `GVL.bSystemReady` (BOOL): System status
-- `GVL.bLightError` (BOOL): Error flag
-- `GVL.bSwitchChannel1/2` (BOOL): Button states
-
-## Demo Mode
-
-When real PLC is not available, the system automatically switches to mock mode with simulated responses and occasional button press events.
+As of the 2026-08-24 audit, this app has **no automated tests** — see
+`docs/AUDIT_FINDINGS.md` §4 and `docs/testing.md` (once written) for the plan
+to add coverage around the highest-risk logic (`RuntimeConfig`'s failover
+state machine, `AppState`'s stale-response guarding, `ApiService`'s error
+classification). If you're adding a test file, it belongs under `test/` at
+this package's root, using plain `flutter_test`.

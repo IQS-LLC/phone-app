@@ -1,3 +1,10 @@
+> **Superseded, 2026-08-24 — do not use.** From the repo's original scaffold
+> commit (`d6ea612`), never updated since, and references `deploy.sh` /
+> `PLC_Project` paths that don't match the real architecture. See
+> `docs/deployment.md` (or `docs/DEPLOYMENT_MANUAL.md` until that split
+> lands) for the current, accurate deployment guide. Kept for historical
+> reference only.
+
 # 🚀 PLC Light Control Demo - Quick Start Guide
 
 ## Server Deployment (Debian Linux)

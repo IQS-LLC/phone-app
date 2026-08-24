@@ -94,7 +94,7 @@ per-line reference. Summary:
 | `find_device/auth_views.py` | JWT login, token refresh, user info |
 | `find_device/commissioning_views.py` | 3 commissioning endpoints (staff only) |
 | `find_device/plc/ads_client.py` | `ADSClient` — thread-safe pyADS wrapper with exponential backoff reconnect |
-| `find_device/plc/device_registry.py` | `DeviceRegistry` — in-memory ADS connection registry per apartment |
+| `find_device/plc/registry.py` | `DeviceRegistry` — in-memory ADS connection registry per apartment |
 | `find_device/middleware.py` | `JWTAuthMiddleware`, `RateLimitMiddleware`, `RequestLoggingMiddleware` |
 | `nginx/nginx.conf` | Nginx config — SSE proxy, security headers, static files |
 | `gunicorn.conf.py` | Gunicorn config — 1 worker, 1000 max_requests |
@@ -212,13 +212,13 @@ Keep this backed up — APK updates signed with a different key cannot replace a
 `DeviceRegistry.for_apartment(apt_id)` returns the per-apartment registry and auto-reconnects
 with exponential backoff (1 s → 2 s → ... → 60 s max).
 
-**PLC variable naming convention expected by the code:**
-- `gvlDALI.*` — DALI light channels (BYTE, 0–100 = %)
-- `gvlRelays.*` — Wall relays (BOOL)
-- `gvlHVAC.*` — Climate (REAL/BOOL)
-- `gvlAlarms.*` — Alarm inputs (BOOL)
-- `gvlSensor.*` — Door/window/motion sensors
-- `gvlMotor.*` — Curtain motors (INT: 0=stop, 1=up, 2=down)
+**PLC variable naming:** there is no single fixed naming convention — see
+`docs/plc-integration.md` for the real, current GVL layout used by the
+control path (`find_device/plc/devices.py`), the separate dynamic
+classification vocabulary used by SuperScan discovery
+(`find_device/discovery/classifier.py`), and why the two currently disagree.
+Do not hand-restate a naming table here again — it drifted out of sync with
+the code once already (audited 2026-08-24, see `docs/AUDIT_FINDINGS.md` §1).
 
 **For a new PLC connection to work:**
 1. NAS must have a route on the CX: `<NAS_IP>` / `<NAS_AMS_NET_ID>` via TwinCAT System Manager

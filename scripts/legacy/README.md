@@ -11,3 +11,16 @@ are superseded by `start_project.ps1` in the repo root, which now correctly:
 Kept here for reference rather than deleted outright, in case anything still
 shells out to them. If nothing has referenced them after a few months, they
 can be deleted for good.
+
+## Also archived here (2026-08-24 audit): `deploy.sh`, `auto_deploy.sh`, `Dockerfile.single`, `run.sh`
+
+These three are part of the repo's original scaffold commit (`d6ea612
+"initial demo push"`, a different author than the project's actual
+development history) — never touched again, never referenced by
+`.github/workflows/deploy.yml`, and describing a single-container deployment
+topology (`PLC_Project` as repo root, one Docker image running
+Postgres+Django+Nginx together) that was never actually adopted. The real
+deployment path is `docker-compose.prod.yml` + the NAS/Cloudflare-Tunnel
+setup documented in `CLAUDE.md` and `docs/DEPLOYMENT_MANUAL.md`. Kept for
+historical reference only — see `docs/AUDIT_FINDINGS.md` for the full audit
+that found this.
