@@ -128,6 +128,19 @@ class RuntimeConfig extends ChangeNotifier {
 
   bool get isReady => _ready;
 
+  /// True when the currently-active endpoint's circuit is already open
+  /// from recent real failures. Callers that fire real requests on a
+  /// recurring timer (AppState's poller) must check this and skip sending
+  /// when true — otherwise an endpoint picked only because it was "the
+  /// least-bad of an all-down pool" (see [_promoteNextHealthyEndpoint]'s
+  /// fallback) gets hammered on every single tick instead of actually
+  /// being left alone for the backoff window [reportOutcome] already
+  /// computed for it. No separate timer is needed to clear this: once the
+  /// window elapses, [_Endpoint.isCircuitOpen] flips false on its own, and
+  /// the very next tick's real request becomes the natural recovery probe.
+  bool get activeEndpointCoolingDown =>
+      _endpoints.isNotEmpty && _endpoints[_activeIndex].isCircuitOpen;
+
   /// How many endpoints are currently configured. 1 means failover is
   /// effectively inert (nothing to fail over *to*) — the whole pool
   /// machinery degrades gracefully to "just use the one URL," which is

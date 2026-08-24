@@ -356,6 +356,29 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     // in the 2026-08-20 hardening pass.
     final requestVersion = _config.version;
     final requestUrl     = _api.baseUrl;
+
+    // The active endpoint's circuit is already known-open from recent real
+    // failures (see RuntimeConfig.activeEndpointCoolingDown) — sending
+    // another request at it every ~1-3s tick would be exactly the
+    // "hammer a dead endpoint" behavior the failover breaker exists to
+    // prevent; the computed backoff window would never actually be
+    // honored against real traffic. Skip this tick's network call
+    // entirely. No separate recovery timer is needed: once the window
+    // elapses, the gate clears on its own and the very next tick's
+    // request becomes the natural recovery probe.
+    if (_config.activeEndpointCoolingDown) {
+      final prevStatus = _connectivityStatus;
+      _connecting = false;
+      _connected = false;
+      _connectivityStatus = ConnectivityStatus.serverUnreachable;
+      if (prevStatus != _connectivityStatus) {
+        _addLog(_connectivityStatus.shortLabel, isError: true);
+      }
+      _failStreak++;
+      notifyListeners();
+      return;
+    }
+
     final result = await _api.getState();
     if (requestVersion != _config.version) {
       // Stale — a newer config change superseded this request while it was
