@@ -13,6 +13,8 @@ non-IT-Team role on the Flutter side.
 """
 from __future__ import annotations
 
+import logging
+
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
@@ -20,7 +22,10 @@ from rest_framework.permissions import IsAdminUser
 
 from .models import Apartment, ApartmentDevice, DeviceAddressScheme, Room, ScanRun, DiscoveredCapability
 from .permissions import log_action
+from .plc.registry import DeviceRegistry
 from .superscan import start_scan, ScanAlreadyRunning
+
+logger = logging.getLogger(__name__)
 
 
 def _ok(**kwargs):
@@ -237,6 +242,18 @@ def promote_capability(request, apartment_id, cap_id):
     )
     cap.apartment_device = device
     cap.save(update_fields=["apartment_device"])
+
+    # Unlike relabel_views.py's assign_output_channel/assign_input, a
+    # promoted capability can be any device_type (including a
+    # DeviceAddressScheme-backed TemplatedDevice) — no single hot-add call
+    # covers every case, so re-sync the whole registry from the DB instead.
+    # Never let this block the response: the device row is already
+    # committed, and the next poll would pick it up anyway if this raced
+    # with a concurrent restart.
+    try:
+        DeviceRegistry.for_apartment(apartment_id).refresh_devices()
+    except Exception:
+        logger.exception("promote_capability: failed to hot-reload registry (will pick up on next restart)")
 
     log_action(request, "promote_capability", apartment=apt,
                capability_id=cap.pk, raw_var_name=cap.raw_var_name, device_id=device.pk)

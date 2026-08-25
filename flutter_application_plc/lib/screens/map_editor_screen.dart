@@ -57,7 +57,7 @@ const _kDeviceCategories = <String, List<_DeviceDef>>{
     _DeviceDef('humidity_sensor',    'Humidity',   Icons.water_drop_outlined,    Color(0xFF4ECDC4)),
   ],
   'Electrical': [
-    _DeviceDef('power_outlet', 'Power',  Icons.power_rounded,              Color(0xFFF5C542)),
+    _DeviceDef('power_outlet', 'Power',  Icons.power_rounded,              C.accent),
     _DeviceDef('usb_outlet',   'USB',    Icons.usb_rounded,                Color(0xFF7CA0C8)),
     _DeviceDef('tv_outlet',    'TV',     Icons.tv_rounded,                 Color(0xFF9F7BFA)),
     _DeviceDef('rj45_outlet',  'RJ45',   Icons.settings_ethernet_rounded,  Color(0xFF26D4BE)),

@@ -108,15 +108,15 @@ class _LoginScreenState extends State<LoginScreen>
                   ),
                   radius: 1.2,
                   colors: const [
-                    Color(0xFF1A1505),
-                    Color(0xFF080812),
+                    Color(0xFF1F0B14),
+                    Color(0xFF0A0812),
                     Color(0xFF060611),
                   ],
                 ),
               ),
             ),
           ),
-          // Subtle gold orb top-right
+          // Subtle accent orb top-right
           Positioned(
             top: -80, right: -60,
             child: Container(
@@ -253,9 +253,9 @@ class _LogoSection extends StatelessWidget {
               center:     Alignment.center,
               startAngle: bgAnim.value * 6.28,
               colors:     const [
-                Color(0xFFF5C542), Color(0xFFFF8C00),
-                Color(0xFFF5C542), Color(0xFFFFD700),
-                Color(0xFFF5C542),
+                C.accent, Color(0xFFF48CAA),
+                C.accent, Color(0xFFFFD3E0),
+                C.accent,
               ],
             ),
             boxShadow: [
@@ -266,7 +266,7 @@ class _LogoSection extends StatelessWidget {
               ),
             ],
           ),
-          child: const Icon(Icons.bolt_rounded, size: 48, color: Colors.black),
+          child: const Icon(Icons.bolt_rounded, size: 48, color: Colors.white),
         ),
       ),
       const SizedBox(height: 24),
@@ -275,7 +275,7 @@ class _LogoSection extends StatelessWidget {
             letterSpacing: -1.5,
             foreground: Paint()
               ..shader = const LinearGradient(
-                colors: [Color(0xFFF5C542), Color(0xFFFFD580)],
+                colors: [C.accent, Color(0xFFFFD3E0)],
               ).createShader(const Rect.fromLTWH(0, 0, 120, 40)),
           )),
       const SizedBox(height: 6),

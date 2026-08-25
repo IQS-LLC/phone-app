@@ -1,7 +1,8 @@
 """
-Generates the Lugh app icon (icon.png) — a gold-to-orange gradient square
-with a black bolt, matching the in-app branding (theme.dart's C.accent /
-the login screen's _LogoSection gradient). Run once with:
+Generates the Lugh app icon (icon.png) — a rosewine gradient square with a
+white bolt, matching the in-app branding (theme.dart's C.accent / G.accent /
+the login screen's _LogoSection gradient) and IQS's (iqs.am) brand primary.
+Run once with:
 
     python assets/icon/generate_icon.py
 
@@ -16,23 +17,23 @@ up or look wrong on shapes flutter_launcher_icons doesn't expect.
 from PIL import Image, ImageDraw
 
 SIZE = 1024
-GOLD   = (245, 197, 66)    # C.accent  0xFFF5C542
-ORANGE = (249, 115, 22)    # 0xFFF97316
-BLACK  = (10, 10, 14)
+ROSE      = (226, 85, 126)   # C.accent        0xFFE2557E
+ROSE_DARK = (194, 63, 104)   # G.accent stop 2 0xFFC23F68
+WHITE     = (255, 255, 255)
 
-img = Image.new("RGB", (SIZE, SIZE), GOLD)
+img = Image.new("RGB", (SIZE, SIZE), ROSE)
 px = img.load()
 
-# Diagonal gradient gold -> orange -> gold, approximating the app's
+# Diagonal gradient rose -> darker rose -> rose, approximating the app's
 # SweepGradient without needing a full conic-gradient implementation.
 for y in range(SIZE):
     for x in range(SIZE):
         t = (x + y) / (2 * SIZE)  # 0..1 diagonal position
-        # triangle wave so it eases back to gold at the far corner
+        # triangle wave so it eases back to the base tone at the far corner
         wave = abs(((t * 2) % 2) - 1)
-        r = int(GOLD[0] + (ORANGE[0] - GOLD[0]) * wave)
-        g = int(GOLD[1] + (ORANGE[1] - GOLD[1]) * wave)
-        b = int(GOLD[2] + (ORANGE[2] - GOLD[2]) * wave)
+        r = int(ROSE[0] + (ROSE_DARK[0] - ROSE[0]) * wave)
+        g = int(ROSE[1] + (ROSE_DARK[1] - ROSE[1]) * wave)
+        b = int(ROSE[2] + (ROSE_DARK[2] - ROSE[2]) * wave)
         px[x, y] = (r, g, b)
 
 draw = ImageDraw.Draw(img)
@@ -48,7 +49,7 @@ bolt = [
     (cx + s * 0.55, cy - s * 0.15),
     (cx + s * 0.05, cy - s * 0.15),
 ]
-draw.polygon(bolt, fill=BLACK)
+draw.polygon(bolt, fill=WHITE)
 
 img.save("assets/icon/icon.png")
 print("Wrote assets/icon/icon.png", img.size)
@@ -66,6 +67,6 @@ fg_bolt = [
     (cx + safe_s * 0.55, cy - safe_s * 0.15),
     (cx + safe_s * 0.05, cy - safe_s * 0.15),
 ]
-fg_draw.polygon(fg_bolt, fill=BLACK)
+fg_draw.polygon(fg_bolt, fill=WHITE)
 fg.save("assets/icon/icon_foreground.png")
 print("Wrote assets/icon/icon_foreground.png", fg.size)

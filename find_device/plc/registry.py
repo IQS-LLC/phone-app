@@ -119,9 +119,8 @@ class DeviceRegistry:
             return
 
         from django.apps import apps
-        Apartment       = apps.get_model('find_device', 'Apartment')
-        ApartmentDevice = apps.get_model('find_device', 'ApartmentDevice')
-        PLCDevice       = apps.get_model('find_device', 'PLCDevice')
+        Apartment = apps.get_model('find_device', 'Apartment')
+        PLCDevice = apps.get_model('find_device', 'PLCDevice')
 
         apartment = Apartment.objects.filter(pk=self.apartment_id).first()
         if apartment is None:
@@ -183,40 +182,7 @@ class DeviceRegistry:
                 )
 
         if apartment is not None:
-            for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room', 'address_scheme'):
-                room_name = d.room.name if d.room else 'Unassigned'
-                if d.address_scheme_id is not None:
-                    # Takes priority over device_type below regardless of
-                    # what device_type this row happens to be classified
-                    # as — a scheme means "address this one via
-                    # DeviceAddressScheme, not the hardcoded class for its
-                    # type." See models.DeviceAddressScheme's docstring.
-                    self.add_templated(apartment_device_id=d.pk,
-                                       channel_or_index=d.channel_or_index,
-                                       gvl_name=d.gvl_name, name=d.name,
-                                       room=room_name, scheme=d.address_scheme)
-                elif d.device_type == ApartmentDevice.TYPE_DALI:
-                    self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name,
-                                  apartment_device_id=d.pk)
-                elif d.device_type == ApartmentDevice.TYPE_RELAY:
-                    self.add_relay(channel=d.channel_or_index, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_SWITCH:
-                    self.add_switch(index=d.channel_or_index, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_CURTAIN:
-                    self.add_curtain(index=d.channel_or_index, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_APPLIANCE:
-                    self.add_appliance(gvl_name=d.gvl_name, display_name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_TOGGLE:
-                    self.add_toggle(var_name=d.gvl_name, name=d.name, room=room_name,
-                                     writable=d.gvl_name not in NAMED_RELAY_READONLY)
-                elif d.device_type == ApartmentDevice.TYPE_NAMED_SWITCH:
-                    self.add_named_switch(var_name=d.gvl_name, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_DOOR_SENSOR:
-                    self.add_door_sensor(index=d.channel_or_index, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_WINDOW_SENSOR:
-                    self.add_window_sensor(index=d.channel_or_index, name=d.name, room=room_name)
-                elif d.device_type == ApartmentDevice.TYPE_MOTION_SENSOR:
-                    self.add_motion_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+            self._load_devices_from_db(apartment)
 
         # No security hardware exists in any apartment's I/O config yet
         # (no gvlIO, no key-switch/alarm/lockdown terminals). Wire this up
@@ -236,6 +202,95 @@ class DeviceRegistry:
         )
 
         self._load_automations()
+
+    def _load_devices_from_db(self, apartment) -> None:
+        """Populate the device dicts from ApartmentDevice rows. Shared by
+        _start() (first load) and refresh_devices() (re-load into an
+        already-connected registry) — never touches the ADS/Modbus
+        connection itself, only the in-memory device dicts."""
+        from django.apps import apps
+        ApartmentDevice = apps.get_model('find_device', 'ApartmentDevice')
+
+        for d in ApartmentDevice.objects.filter(apartment=apartment).select_related('room', 'address_scheme'):
+            room_name = d.room.name if d.room else 'Unassigned'
+            if d.address_scheme_id is not None:
+                # Takes priority over device_type below regardless of
+                # what device_type this row happens to be classified
+                # as — a scheme means "address this one via
+                # DeviceAddressScheme, not the hardcoded class for its
+                # type." See models.DeviceAddressScheme's docstring.
+                self.add_templated(apartment_device_id=d.pk,
+                                   channel_or_index=d.channel_or_index,
+                                   gvl_name=d.gvl_name, name=d.name,
+                                   room=room_name, scheme=d.address_scheme)
+            elif d.device_type == ApartmentDevice.TYPE_DALI:
+                self.add_dali(channel=d.channel_or_index, name=d.name, room=room_name,
+                              apartment_device_id=d.pk)
+            elif d.device_type == ApartmentDevice.TYPE_RELAY:
+                self.add_relay(channel=d.channel_or_index, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_SWITCH:
+                self.add_switch(index=d.channel_or_index, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_CURTAIN:
+                self.add_curtain(index=d.channel_or_index, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_APPLIANCE:
+                self.add_appliance(gvl_name=d.gvl_name, display_name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_TOGGLE:
+                self.add_toggle(var_name=d.gvl_name, name=d.name, room=room_name,
+                                 writable=d.gvl_name not in NAMED_RELAY_READONLY)
+            elif d.device_type == ApartmentDevice.TYPE_NAMED_SWITCH:
+                self.add_named_switch(var_name=d.gvl_name, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_DOOR_SENSOR:
+                self.add_door_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_WINDOW_SENSOR:
+                self.add_window_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+            elif d.device_type == ApartmentDevice.TYPE_MOTION_SENSOR:
+                self.add_motion_sensor(index=d.channel_or_index, name=d.name, room=room_name)
+
+    def refresh_devices(self) -> None:
+        """Re-read ApartmentDevice rows from the DB into this already-running
+        registry, without touching the live ADS/Modbus connection.
+
+        _apt_instances is a process-level cache (see class docstring) built
+        once at _start() — a Room/ApartmentDevice created afterward through
+        SuperScan promote, relabel, or the add-room endpoint was previously
+        invisible until the whole Django worker restarted. Call this right
+        after any such write instead. Safe to call anytime: the device dicts
+        are cleared and rebuilt from a single fresh query, and callers only
+        ever read them through the same lock-free dict access _start() used
+        (each add_* call replaces its dict entry, so a reader mid-refresh at
+        worst sees an old-but-consistent or new-but-consistent snapshot per
+        key, never a torn value).
+        """
+        with self._lock:
+            self._dali.clear()
+            self._relays.clear()
+            self._switches.clear()
+            self._curtains.clear()
+            self._appliances.clear()
+            self._toggles.clear()
+            self._named_switches.clear()
+            self._door_sensors.clear()
+            self._window_sensors.clear()
+            self._motion_sensors.clear()
+            self._templated.clear()
+
+            from django.apps import apps
+            Apartment = apps.get_model('find_device', 'Apartment')
+            apartment = Apartment.objects.filter(pk=self.apartment_id).first()
+            if apartment is not None:
+                self._load_devices_from_db(apartment)
+
+        logger.info(
+            "DeviceRegistry[apt%s] refreshed: %d DALI, %d relays, %d curtains, "
+            "%d switches, %d door, %d window, %d motion, %d appliances, "
+            "%d toggles, %d named switches, %d templated",
+            self.apartment_id,
+            len(self._dali), len(self._relays), len(self._curtains),
+            len(self._switches), len(self._door_sensors),
+            len(self._window_sensors), len(self._motion_sensors),
+            len(self._appliances), len(self._toggles),
+            len(self._named_switches), len(self._templated),
+        )
 
     # ── Automation rules ──────────────────────────────────────────────────────
     # "When this input does X, do Y to that output" — configured entirely on
@@ -586,7 +641,23 @@ class DeviceRegistry:
     def all_templated(self)       -> List[TemplatedDevice]: return list(self._templated.values())
 
     def rooms(self) -> List[str]:
-        seen, result = set(), []
+        """Room names for this apartment, freshly queried from the Room
+        table every call (cheap, indexed FK filter) rather than derived
+        from the in-memory device dicts — a Room with zero devices assigned
+        yet (just created via the add-room endpoint) has no device to
+        derive it from, so it would never appear otherwise, restart or not.
+        Devices whose room isn't a real Room row (legacy data, or created
+        before Rooms existed) still surface via the 'Unassigned'-style
+        fallback below, same as before this method read the DB directly."""
+        from django.apps import apps
+        Room = apps.get_model('find_device', 'Room')
+
+        result = list(
+            Room.objects.filter(apartment_id=self.apartment_id)
+            .order_by('sort_order', 'name')
+            .values_list('name', flat=True)
+        )
+        seen = set(result)
         for d in (*self._dali.values(), *self._relays.values(), *self._curtains.values()):
             if d.room not in seen:
                 seen.add(d.room)

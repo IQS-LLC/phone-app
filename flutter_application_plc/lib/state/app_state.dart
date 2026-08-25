@@ -324,6 +324,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (!_initializedDevices) await _loadDevices();
   }
 
+  /// Force a fresh fetch of the room/device *structure* (not just live
+  /// values), bypassing the [_initializedDevices] gate that normally makes
+  /// this a one-shot, first-load-only fetch. Rooms/devices added through
+  /// configuration (SuperScan promote, relabel, the room-add endpoint) only
+  /// ever reach a session that's already running via this — the periodic
+  /// poll deliberately never re-fetches structure on its own, since that
+  /// would mean re-parsing the full device list on every ~3s tick for no
+  /// reason. Wired to the Home screen's pull-to-refresh.
+  Future<void> refreshDeviceList() async {
+    await _loadDevices();
+    notifyListeners();
+  }
+
   // ── Polling ────────────────────────────────────────────────────────────────
 
   /// Coalescing wrapper: if a poll is already running, every caller

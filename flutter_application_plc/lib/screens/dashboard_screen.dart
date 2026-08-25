@@ -200,8 +200,17 @@ class _DashboardScreenState extends State<DashboardScreen>
 
         return Scaffold(
           backgroundColor: C.bg,
-          body: CustomScrollView(
-            physics: const BouncingScrollPhysics(),
+          // Rooms/devices added via configuration (SuperScan promote,
+          // relabel, add-room) only reach an already-running session
+          // through an explicit structure refetch — see
+          // AppState.refreshDeviceList's doc comment. Pull-to-refresh is
+          // the standard, discoverable gesture for that on this screen.
+          body: RefreshIndicator(
+            onRefresh: _st.refreshDeviceList,
+            color:            C.accent,
+            backgroundColor:  C.card,
+            child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
             slivers: [
 
               // ── Immersive hero ───────────────────────────────────────────
@@ -343,6 +352,7 @@ class _DashboardScreenState extends State<DashboardScreen>
                 ),
               ),
             ],
+            ),
           ),
         );
       },

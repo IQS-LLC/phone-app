@@ -18,16 +18,21 @@ class C {
   static const border2  = Color(0xFF222248);   // interactive element focus ring
 
   // ── Semantic palette ──────────────────────────────────────────────────────
-  static const accent    = Color(0xFFF5C542);  // warm gold — primary brand color
-  static const accentDim = Color(0xFFD4A535);  // pressed / darker state
-  static const accentLo  = Color(0xFF2E2208);  // ambient gold background
+  // Brand-aligned with IQS (iqs.am) — primary #983353, secondary #069dd5,
+  // both lifted in lightness for legibility on near-black surfaces. Anything
+  // reading these tokens stays in sync automatically; a hardcoded literal
+  // copy of the old gold value is what caused the "unsynchronized" look
+  // before this change (fixed at each call site, not just here).
+  static const accent    = Color(0xFFE2557E);  // IQS rosewine — primary brand color
+  static const accentDim = Color(0xFFB8395F);  // pressed / darker state (≈ IQS #983353)
+  static const accentLo  = Color(0xFF2A0F1A);  // ambient rosewine background
 
   static const green     = Color(0xFF2DD987);  // success, active, on
   static const greenLo   = Color(0xFF061A0F);
-  static const red       = Color(0xFFFF4B4B);  // error, alert, danger
+  static const red       = Color(0xFFE5484F);  // error, alert, danger (≈ IQS #c7383f)
   static const redLo     = Color(0xFF1A0505);
-  static const blue      = Color(0xFF5BA8FF);  // info, secondary
-  static const blueLo    = Color(0xFF071528);
+  static const blue      = Color(0xFF29B6E8);  // info, secondary (≈ IQS #069dd5)
+  static const blueLo    = Color(0xFF06222E);
   static const orange    = Color(0xFFFD9A3E);  // warm / dim lighting
   static const orangeLo  = Color(0xFF1A0B00);
   static const purple    = Color(0xFF9F7BFA);  // cinema / night
@@ -128,11 +133,11 @@ class Cur {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class G {
-  // Primary brand CTA — warm gold
+  // Primary brand CTA — IQS rosewine
   static const accent = LinearGradient(
     begin: Alignment.topLeft,
     end:   Alignment.bottomRight,
-    colors: [Color(0xFFF8CB4A), Color(0xFFE8A820)],
+    colors: [Color(0xFFEC6D93), Color(0xFFC23F68)],
   );
 
   // Ambient card gradient — subtle depth on glass surfaces
