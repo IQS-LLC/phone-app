@@ -294,7 +294,13 @@ class _DashboardScreenState extends State<DashboardScreen>
                     ),
 
                     // ── Spatial room grid ──────────────────────────────
-                    if (rooms.isNotEmpty) ...[
+                    if (rooms.isEmpty) ...[
+                      const SizedBox(height: 24),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: _EmptyRoomsCard(onRefresh: _st.refreshDeviceList),
+                      ),
+                    ] else ...[
                       _SectionLabel('your home', badge: '${rooms.length}', top: 24),
                       const SizedBox(height: 14),
                       Padding(
@@ -768,6 +774,62 @@ void _showConnectivityDetail(BuildContext context, ConnectivityStatus status) {
         ],
       ]),
     ),
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Empty state — no rooms configured yet
+// ═══════════════════════════════════════════════════════════════════════════════
+
+class _EmptyRoomsCard extends StatelessWidget {
+  final Future<void> Function() onRefresh;
+  const _EmptyRoomsCard({required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+    decoration: BoxDecoration(
+      color: C.card,
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: C.border, width: 0.5),
+    ),
+    child: Column(children: [
+      Container(
+        width: 48, height: 48,
+        decoration: BoxDecoration(
+          color: C.accent.withAlpha(20),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Icon(Icons.add_home_rounded, color: C.accent, size: 24),
+      ),
+      const SizedBox(height: 14),
+      Text('No rooms set up yet', style: AppText.title),
+      const SizedBox(height: 6),
+      Text(
+        'Your building\'s Tech Team can add rooms during configuration. '
+        'Already added one? Pull down to refresh.',
+        textAlign: TextAlign.center,
+        style: AppText.small.copyWith(color: C.textSec, height: 1.5),
+      ),
+      const SizedBox(height: 16),
+      TapScale(
+        onTap: onRefresh,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+          decoration: BoxDecoration(
+            color: C.card2,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: C.border2, width: 0.5),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.refresh_rounded, color: C.textSec, size: 15),
+            const SizedBox(width: 6),
+            Text('Refresh', style: AppText.bodySm.copyWith(color: C.textSec)),
+          ]),
+        ),
+      ),
+    ]),
   );
 }
 
