@@ -17,7 +17,7 @@
 #   HTTPS_ENABLED=true            — only once TLS actually terminates in front
 #
 # NAS first-time setup:
-#   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media,backups}
+#   mkdir -p /volume1/docker/lugh/{postgres_data,redis_data,static,media,backups,web_app}
 #   cp docker-compose.prod.yml /volume1/docker/lugh/
 #   cat > /volume1/docker/lugh/.env <<'EOF'
 #   DOCKERHUB_USERNAME=yourhandle
@@ -196,6 +196,7 @@ services:
       - /volume1/docker/lugh/nginx-locations.conf:/etc/nginx/lugh-locations.conf:ro
       - /volume1/docker/lugh/static:/app/staticfiles:ro
       - /volume1/docker/lugh/media:/app/media:ro
+      - /volume1/docker/lugh/web_app:/app/web_app:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
     ports:
       - "9080:80"

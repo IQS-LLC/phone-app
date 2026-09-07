@@ -1,11 +1,11 @@
 {
-    "name": "flutter_application_plc",
-    "short_name": "flutter_application_plc",
+    "name": "Lugh",
+    "short_name": "Lugh",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#1F0B14",
+    "theme_color": "#983353",
+    "description": "Lugh smart-building control by IQS.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
