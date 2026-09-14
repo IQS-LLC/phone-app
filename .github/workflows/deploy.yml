@@ -57,6 +57,7 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [main]
+  workflow_dispatch: {}
 
 env:
   DJANGO_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/lugh-django
