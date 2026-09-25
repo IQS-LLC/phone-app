@@ -204,6 +204,79 @@ def check_plc_heartbeat(self):
         raise self.retry(exc=exc)
 
 
+# ── Sunset/sunrise manual override ──────────────────────────────────────────
+
+@shared_task(name="find_device.tasks.apply_sunset_sunrise_overrides", bind=True, max_retries=2)
+def apply_sunset_sunrise_overrides(self):
+    """
+    For every Apartment with auto_sunset_sunrise=False and both override
+    times set, directly ADS-write the on/off state its scheme-driven
+    ("custom") devices should be in right now.
+
+    Deliberately writes every tick (every 5 min via Celery Beat) rather than
+    tracking "already applied today" — a repeated write of the same boolean
+    is harmless and this way a worker restart or a missed tick can never
+    leave lights stuck in the wrong state until the next crossing.
+
+    This is intentionally independent of any automatic behavior a PLC's own
+    on-board program might already implement (e.g. Building Common Areas'
+    MAIN.fbHttpClientOpenWeatherMap) — see Apartment.auto_sunset_sunrise's
+    docstring. Only apartments where an admin has explicitly turned auto
+    off are touched; every apartment defaults to auto=True, i.e. untouched.
+    """
+    try:
+        apply_sunset_sunrise_overrides_once()
+    except Exception as exc:
+        logger.error("apply_sunset_sunrise_overrides: unexpected error — %s", exc)
+        raise self.retry(exc=exc)
+
+
+def lights_should_be_on(now, sunset, sunrise) -> bool:
+    """Lights ON from sunset until sunrise — handles the normal overnight
+    wrap (sunset 18:30 > sunrise 06:30) and the same-day case alike."""
+    if sunset <= sunrise:
+        return sunset <= now < sunrise
+    return now >= sunset or now < sunrise
+
+
+def apply_sunset_sunrise_overrides_once(now=None):
+    """
+    The actual work, as a plain function so it runs identically from Celery
+    Beat (production stack) or find_device.embedded_scheduler (a single
+    process with no Celery/Redis, e.g. a native dev/stopgap server).
+    `now` (a datetime.time) is injectable for tests.
+    """
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+    from django.conf import settings
+    from .models import Apartment
+    from .plc.registry import DeviceRegistry
+
+    # Override times are the building's wall-clock times — never compare
+    # them against UTC (TIME_ZONE's default), or 18:30 fires at 22:30 in
+    # Yerevan.
+    if now is None:
+        now = datetime.now(ZoneInfo(settings.BUILDING_TIME_ZONE)).time()
+
+    apartments = Apartment.objects.filter(
+        auto_sunset_sunrise=False,
+        sunset_override_time__isnull=False,
+        sunrise_override_time__isnull=False,
+        # An admin-started Christmas show owns the lights while it runs;
+        # without this the two would fight every tick.
+        christmas_mode_active=False,
+    )
+
+    for apt in apartments:
+        want_on = lights_should_be_on(now, apt.sunset_override_time, apt.sunrise_override_time)
+        try:
+            registry = DeviceRegistry.for_apartment(apt.pk)
+            for dev in registry.all_templated():
+                dev.write(want_on)
+        except Exception as exc:
+            logger.error("apply_sunset_sunrise_overrides: apartment %d failed — %s", apt.pk, exc)
+
+
 # ── Alarm evaluation ──────────────────────────────────────────────────────────
 
 # Thresholds for automatic alarm detection

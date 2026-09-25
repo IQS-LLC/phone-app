@@ -846,6 +846,7 @@ class DeviceRegistry:
         appliance_states   = _read_group(self._appliances, "Appliance")
         toggle_states       = _read_group(self._toggles, "Toggle")
         named_switch_states = _read_group(self._named_switches, "Named switch")
+        custom_states       = _read_group(self._templated, "Templated")
 
         security_state = {}
         if self._security:
@@ -869,6 +870,7 @@ class DeviceRegistry:
             'appliances':  appliance_states,
             'toggles':     toggle_states,
             'named_switches': named_switch_states,
+            'custom':      custom_states,
             'security':    security_state,
         }
 

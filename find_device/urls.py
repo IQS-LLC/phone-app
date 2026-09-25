@@ -33,6 +33,9 @@ urlpatterns = [
     # ── Named relays/lights (ventilators, balcony/mirror/var lights, etc.) ──
     path('toggle/<str:var_name>/',          views.set_toggle),
 
+    # ── Scheme-driven / DeviceAddressScheme devices ──────────────────────────
+    path('custom/<int:apartment_device_id>/', views.set_custom),
+
     # ── Sensors (read-only) ──────────────────────────────────────────────────
     path('sensors/',                        views.get_sensors),
 
@@ -101,6 +104,8 @@ apartment_management_urlpatterns = [
     path('',          user_management_views.apartment_management_list,   name='apartments-mgmt-list'),
     path('<int:pk>/', user_management_views.apartment_management_detail, name='apartments-mgmt-detail'),
     path('<int:pk>/plc/',              user_management_views.apartment_plc,             name='apartments-mgmt-plc'),
+    path('<int:pk>/building-settings/', user_management_views.apartment_building_settings, name='apartments-mgmt-building-settings'),
+    path('<int:pk>/christmas-mode/',   user_management_views.apartment_christmas_mode,  name='apartments-mgmt-christmas-mode'),
     path('<int:pk>/rooms/',            user_management_views.apartment_rooms,           name='apartments-mgmt-rooms'),
     path('<int:pk>/rooms/reorder/',    user_management_views.apartment_rooms_reorder,   name='apartments-mgmt-rooms-reorder'),
     path('<int:pk>/rooms/<int:room_id>/', user_management_views.apartment_room_detail,  name='apartments-mgmt-room-detail'),

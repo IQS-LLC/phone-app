@@ -486,6 +486,112 @@ def apartment_plc(request: Request, pk: int) -> Response:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Building-wide admin controls (sunset/sunrise override, poll interval,
+# Christmas chase) — see Apartment's own field docstrings for the full
+# rationale. Meaningful for a building-wide apartment (e.g. "Building
+# Common Areas"); harmless to read/write on a normal one too, since the
+# fields default to no-op values there.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _building_settings_detail(apartment: Apartment) -> dict:
+    return {
+        "auto_sunset_sunrise":   apartment.auto_sunset_sunrise,
+        "sunset_override_time":  apartment.sunset_override_time.strftime("%H:%M") if apartment.sunset_override_time else None,
+        "sunrise_override_time": apartment.sunrise_override_time.strftime("%H:%M") if apartment.sunrise_override_time else None,
+        "poll_interval_s":       apartment.poll_interval_s,
+        "christmas_mode_active": apartment.christmas_mode_active,
+    }
+
+
+def _parse_hhmm(value: str):
+    from datetime import datetime
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except (TypeError, ValueError):
+        return None
+
+
+@api_view(["GET", "PATCH"])
+@permission_classes([IsAdminUser])
+def apartment_building_settings(request: Request, pk: int) -> Response:
+    apartment = get_object_or_404(Apartment, pk=pk)
+
+    if request.method == "GET":
+        return _ok({"settings": _building_settings_detail(apartment)})
+
+    update_fields = []
+
+    if "auto_sunset_sunrise" in request.data:
+        apartment.auto_sunset_sunrise = bool(request.data["auto_sunset_sunrise"])
+        update_fields.append("auto_sunset_sunrise")
+
+    for field, key in (
+        ("sunset_override_time", "sunset_override_time"),
+        ("sunrise_override_time", "sunrise_override_time"),
+    ):
+        if key in request.data:
+            raw = request.data[key]
+            if raw in (None, ""):
+                setattr(apartment, field, None)
+            else:
+                parsed = _parse_hhmm(raw)
+                if parsed is None:
+                    return _err(f"{key} must be 'HH:MM' 24-hour, e.g. '18:30'", "INVALID_PARAM", 400)
+                setattr(apartment, field, parsed)
+            update_fields.append(field)
+
+    if "poll_interval_s" in request.data:
+        try:
+            interval = int(request.data["poll_interval_s"])
+        except (TypeError, ValueError):
+            return _err("poll_interval_s must be an integer", "INVALID_PARAM", 400)
+        # Never below the app's own hardcoded 1s safety floor (see
+        # AppState._fastInterval's comment) — this field can only slow the
+        # client down, never speed it past what the CX8190's ADS layer has
+        # already been tuned to tolerate.
+        if interval < 1 or interval > 60:
+            return _err("poll_interval_s must be between 1 and 60", "INVALID_PARAM", 400)
+        apartment.poll_interval_s = interval
+        update_fields.append("poll_interval_s")
+
+    if update_fields:
+        apartment.save(update_fields=update_fields)
+        log_action(request, "building_settings_updated", apartment=apartment, fields=update_fields)
+
+    return _ok({"settings": _building_settings_detail(apartment)})
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
+def apartment_christmas_mode(request: Request, pk: int) -> Response:
+    from . import lighting_effects
+
+    apartment = get_object_or_404(Apartment, pk=pk)
+    active = bool(request.data.get("active", True))
+
+    # The DB flag is the source of truth the show's own loop re-checks, so
+    # it must be written *before* starting (else the loop can read the old
+    # False and exit) and before stopping (so any other executor sees it).
+    if active:
+        if not lighting_effects.has_devices(apartment.pk):
+            return _err(
+                f"{apartment.name} has no building lights set up for Christmas mode yet.",
+                "NO_DEVICES", 409,
+            )
+        apartment.christmas_mode_active = True
+        apartment.save(update_fields=["christmas_mode_active"])
+        started = lighting_effects.start_christmas_chase(apartment.pk)
+        log_action(request, "christmas_mode_started", apartment=apartment, already_running=not started)
+    else:
+        apartment.christmas_mode_active = False
+        apartment.save(update_fields=["christmas_mode_active"])
+        lighting_effects.stop_christmas_chase(apartment.pk)
+        log_action(request, "christmas_mode_stopped", apartment=apartment)
+
+    return _ok({"christmas_mode_active": apartment.christmas_mode_active})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Rooms — rename/reorder (Tech Team layout control)
 # ─────────────────────────────────────────────────────────────────────────────
 

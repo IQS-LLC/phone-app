@@ -62,17 +62,32 @@ class ToggleDevice {
   final String name;
   final String room;
   final bool   writable;
+  // Set only for a scheme-driven ("custom") device merged into this same
+  // list/UI — see AppState._updateFromJson. When non-null, writes must go
+  // through ApiService.setCustom(apartmentDeviceId, ...) instead of
+  // setToggle(varName, ...); varName is still populated (synthetic
+  // 'custom:<id>') purely as the map key every existing toggle helper
+  // (effectiveToggle, toggleDeviceState, _pendingToggle) already keys off.
+  final int?   apartmentDeviceId;
   const ToggleDevice({
     required this.varName,
     required this.name,
     required this.room,
     required this.writable,
+    this.apartmentDeviceId,
   });
   factory ToggleDevice.fromJson(Map<String, dynamic> j) => ToggleDevice(
     varName:  j['var_name'] as String,
     name:     j['name']     as String,
     room:     j['room']     as String,
     writable: j['writable'] as bool? ?? true,
+  );
+  factory ToggleDevice.fromCustomJson(Map<String, dynamic> j) => ToggleDevice(
+    varName:           'custom:${j['apartment_device_id']}',
+    name:              j['name'] as String,
+    room:              j['room'] as String,
+    writable:          true,
+    apartmentDeviceId: j['apartment_device_id'] as int,
   );
 }
 
@@ -214,6 +229,11 @@ class SystemState {
     });
     (j['toggles'] as Map<String, dynamic>? ?? {}).forEach((k, v) {
       toggles[k] = v as bool?;
+    });
+    // Scheme-driven devices ride in the same toggles map, keyed the same
+    // way ToggleDevice.fromCustomJson names them — see AppState._loadDevices.
+    (j['custom'] as Map<String, dynamic>? ?? {}).forEach((k, v) {
+      toggles['custom:$k'] = v as bool?;
     });
 
     final sec = j['security'] as Map<String, dynamic>?;

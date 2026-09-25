@@ -285,6 +285,12 @@ class ApiService {
     String varName, bool on,
   ) => _post('/plc/toggle/$varName/', {'state': on ? 'true' : 'false'});
 
+  // ── Scheme-driven (custom / DeviceAddressScheme) devices ────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> setCustom(
+    int apartmentDeviceId, bool on,
+  ) => _post('/plc/custom/$apartmentDeviceId/', {'state': on ? 'true' : 'false'});
+
   // ── Security ────────────────────────────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> setAlarm(bool armed) =>

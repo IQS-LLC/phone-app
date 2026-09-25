@@ -728,6 +728,12 @@ class TemplatedDevice:
             return self._mock_value
         return self._client.read(self._var_read, self._plctype)
 
+    # DeviceRegistry.read_full_state()'s _read_group helper calls
+    # read_state() uniformly across every device category (WallRelay,
+    # NamedRelay, SwitchInput, ...) — alias so TemplatedDevice fits that
+    # same helper instead of needing a special case.
+    read_state = read
+
     def write(self, value: Any):
         """
         Writes value, then pulses the commit variable true->false if the

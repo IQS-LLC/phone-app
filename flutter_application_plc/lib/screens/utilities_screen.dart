@@ -97,9 +97,12 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
       setState(() { _loading = false; _loadError = r.errorMessage ?? 'Failed to load devices'; });
       return;
     }
-    final devices = (r.data!['toggles'] as List<dynamic>? ?? [])
-        .map((e) => ToggleDevice.fromJson(e as Map<String, dynamic>))
-        .toList();
+    final devices = [
+      ...(r.data!['toggles'] as List<dynamic>? ?? [])
+          .map((e) => ToggleDevice.fromJson(e as Map<String, dynamic>)),
+      ...(r.data!['custom'] as List<dynamic>? ?? [])
+          .map((e) => ToggleDevice.fromCustomJson(e as Map<String, dynamic>)),
+    ];
     setState(() { _devices = devices; });
   }
 
@@ -112,10 +115,14 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
       return;
     }
     final raw = r.data!['toggles'] as Map<String, dynamic>? ?? {};
+    final rawCustom = r.data!['custom'] as Map<String, dynamic>? ?? {};
     setState(() {
       _loading = false;
       _loadError = null;
-      _states = raw.map((k, v) => MapEntry(k, v as bool?));
+      _states = {
+        ...raw.map((k, v) => MapEntry(k, v as bool?)),
+        ...rawCustom.map((k, v) => MapEntry('custom:$k', v as bool?)),
+      };
       _plcConnected = r.data!['plc_connected'] as bool? ?? false;
     });
   }
@@ -125,7 +132,9 @@ class _UtilitiesScreenState extends State<UtilitiesScreen> {
       _pending.add(dev.varName);
       _states[dev.varName] = on;
     });
-    final r = await _api.setToggle(dev.varName, on);
+    final r = dev.apartmentDeviceId != null
+        ? await _api.setCustom(dev.apartmentDeviceId!, on)
+        : await _api.setToggle(dev.varName, on);
     if (!mounted) return;
     setState(() => _pending.remove(dev.varName));
     if (!r.success) {

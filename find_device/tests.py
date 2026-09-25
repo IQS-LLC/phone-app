@@ -2411,3 +2411,168 @@ class AutomationExecutionTests(TestCase):
         registry.add_relay(channel=10, name="Exec Relay", room="")
         registry.reload_automation(rule.pk)   # subscribe() returns False under mock — should not raise
         registry.remove_automation(rule.pk)   # no-op since nothing was actually subscribed — should not raise
+
+
+class BuildingControlsTests(TestCase):
+    """
+    Building-wide admin controls (2026-09-25): scheme-driven ("custom")
+    devices surfacing in /plc/state/ + /plc/devices/, the building-settings
+    endpoint (sunset/sunrise override, poll cooldown), Christmas mode, and
+    the sunset/sunrise override job itself. Fresh apartment per test, same
+    DeviceRegistry-cache reasoning as DeviceAddressSchemeTests.
+    """
+
+    def setUp(self):
+        DeviceRegistry._apt_instances.clear()
+        self.apartment = Apartment.objects.create(name="Test Common Areas", building="Main Building")
+        self.scheme = DeviceAddressScheme.objects.create(
+            name="test_building_relay_v1", gvl="GVL_Relay",
+            read_var_template="{gvl}.bRelay{index}", write_var_template="{gvl}.bRelay{index}",
+            plc_type="BOOL", protocol=DeviceAddressScheme.PROTOCOL_ADS,
+        )
+        self.staff = User.objects.create_user(username="bc_staff", password="pw12345", is_staff=True)
+        self.member = User.objects.create_user(username="bc_member", password="pw12345")
+        for user in (self.staff, self.member):
+            ApartmentMembership.objects.create(
+                user=user, apartment=self.apartment,
+                role=ApartmentMembership.ROLE_OWNER, is_default=True,
+            )
+
+    def _token(self, username):
+        return self.client.post("/auth/login/", {"username": username, "password": "pw12345"}).json()["access"]
+
+    def _add_light(self, index):
+        return ApartmentDevice.objects.create(
+            apartment=self.apartment, device_type=ApartmentDevice.TYPE_CUSTOM,
+            channel_or_index=index, name=f"Relay {index}", address_scheme=self.scheme,
+        )
+
+    def _url(self, suffix):
+        return f"/manage/apartments/{self.apartment.pk}/{suffix}/"
+
+    # ── custom devices in the live API ─────────────────────────────────────
+
+    def test_custom_devices_appear_in_state_and_device_list(self):
+        light = self._add_light(0)
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self._token('bc_member')}"}
+        state = self.client.get("/plc/state/", **auth).json()
+        self.assertIn(str(light.pk), state["custom"])
+        self.assertEqual(state["poll_interval_s"], 1)
+        devices = self.client.get("/plc/devices/", **auth).json()
+        self.assertEqual([d["apartment_device_id"] for d in devices["custom"]], [light.pk])
+
+    def test_custom_device_write_endpoint_round_trips(self):
+        light = self._add_light(0)
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self._token('bc_member')}"}
+        resp = self.client.post(f"/plc/custom/{light.pk}/", {"state": "true"}, **auth)
+        self.assertEqual(resp.status_code, 200)
+        state = self.client.get("/plc/state/", **auth).json()
+        self.assertIs(state["custom"][str(light.pk)], True)
+
+    # ── building settings ──────────────────────────────────────────────────
+
+    def test_building_settings_is_staff_only(self):
+        resp = self.client.get(self._url("building-settings"),
+                               HTTP_AUTHORIZATION=f"Bearer {self._token('bc_member')}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_building_settings_patch_persists_and_reaches_state(self):
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self._token('bc_staff')}"}
+        resp = self.client.patch(
+            self._url("building-settings"),
+            {"auto_sunset_sunrise": False, "sunset_override_time": "18:30",
+             "sunrise_override_time": "06:30", "poll_interval_s": 5},
+            content_type="application/json", **auth,
+        )
+        self.assertEqual(resp.status_code, 200)
+        s = resp.json()["settings"]
+        self.assertEqual((s["auto_sunset_sunrise"], s["sunset_override_time"],
+                          s["sunrise_override_time"], s["poll_interval_s"]),
+                         (False, "18:30", "06:30", 5))
+        self.assertEqual(self.client.get("/plc/state/", **auth).json()["poll_interval_s"], 5)
+
+    def test_building_settings_rejects_bad_input(self):
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self._token('bc_staff')}"}
+        for body in ({"sunset_override_time": "25:99"}, {"poll_interval_s": 0}, {"poll_interval_s": 61}):
+            resp = self.client.patch(self._url("building-settings"), body,
+                                     content_type="application/json", **auth)
+            self.assertEqual(resp.status_code, 400, body)
+        self.apartment.refresh_from_db()
+        self.assertEqual(self.apartment.poll_interval_s, 1)
+
+    # ── Christmas mode ─────────────────────────────────────────────────────
+
+    def test_christmas_mode_refuses_when_there_are_no_lights(self):
+        resp = self.client.post(self._url("christmas-mode"), {"active": True},
+                                content_type="application/json",
+                                HTTP_AUTHORIZATION=f"Bearer {self._token('bc_staff')}")
+        self.assertEqual(resp.status_code, 409)
+        self.apartment.refresh_from_db()
+        self.assertFalse(self.apartment.christmas_mode_active)
+
+    def test_christmas_mode_start_then_stop(self):
+        import time
+        from find_device import lighting_effects
+        self._add_light(0)
+        self._add_light(1)
+        auth = {"HTTP_AUTHORIZATION": f"Bearer {self._token('bc_staff')}"}
+        try:
+            resp = self.client.post(self._url("christmas-mode"), {"active": True},
+                                    content_type="application/json", **auth)
+            self.assertEqual(resp.status_code, 200)
+            self.apartment.refresh_from_db()
+            self.assertTrue(self.apartment.christmas_mode_active)
+            self.assertTrue(lighting_effects.is_running(self.apartment.pk))
+
+            resp = self.client.post(self._url("christmas-mode"), {"active": False},
+                                    content_type="application/json", **auth)
+            self.assertEqual(resp.status_code, 200)
+            self.apartment.refresh_from_db()
+            self.assertFalse(self.apartment.christmas_mode_active)
+            deadline = time.time() + 3
+            while lighting_effects.is_running(self.apartment.pk) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(lighting_effects.is_running(self.apartment.pk))
+        finally:
+            lighting_effects.stop_christmas_chase(self.apartment.pk)
+
+    # ── sunset / sunrise override job ──────────────────────────────────────
+
+    def test_lights_should_be_on_handles_overnight_wrap(self):
+        from datetime import time as t
+        from find_device.tasks import lights_should_be_on
+        sunset, sunrise = t(18, 30), t(6, 30)
+        self.assertTrue(lights_should_be_on(t(20, 0), sunset, sunrise))
+        self.assertTrue(lights_should_be_on(t(2, 0), sunset, sunrise))
+        self.assertFalse(lights_should_be_on(t(12, 0), sunset, sunrise))
+        self.assertFalse(lights_should_be_on(t(6, 30), sunset, sunrise))
+        self.assertTrue(lights_should_be_on(t(18, 30), sunset, sunrise))
+
+    def _override(self, **extra):
+        from datetime import time as t
+        Apartment.objects.filter(pk=self.apartment.pk).update(
+            auto_sunset_sunrise=False, sunset_override_time=t(18, 30),
+            sunrise_override_time=t(6, 30), **extra,
+        )
+
+    def test_override_job_switches_lights_for_the_current_window(self):
+        from datetime import time as t
+        from find_device.tasks import apply_sunset_sunrise_overrides_once
+        light = self._add_light(0)
+        self._override()
+        dev = DeviceRegistry.for_apartment(self.apartment.pk).templated(light.pk)
+        apply_sunset_sunrise_overrides_once(now=t(20, 0))
+        self.assertIs(dev.read(), True)
+        apply_sunset_sunrise_overrides_once(now=t(12, 0))
+        self.assertIs(dev.read(), False)
+
+    def test_override_job_leaves_automatic_and_christmas_apartments_alone(self):
+        from datetime import time as t
+        from find_device.tasks import apply_sunset_sunrise_overrides_once
+        light = self._add_light(0)
+        dev = DeviceRegistry.for_apartment(self.apartment.pk).templated(light.pk)
+        apply_sunset_sunrise_overrides_once(now=t(20, 0))       # auto on (default)
+        self.assertIs(dev.read(), False)
+        self._override(christmas_mode_active=True)
+        apply_sunset_sunrise_overrides_once(now=t(20, 0))       # the show owns the lights
+        self.assertIs(dev.read(), False)

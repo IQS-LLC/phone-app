@@ -11,6 +11,7 @@ import '../theme.dart';
 import '../utils/apartment_display.dart';
 import '../utils/room_display.dart';
 import '../widgets/common_widgets.dart';
+import 'building_controls_screen.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Lugh — Digital Home
@@ -62,6 +63,11 @@ class _DashboardScreenState extends State<DashboardScreen>
     _breatheCtrl.dispose();
     super.dispose();
   }
+
+  // A building-wide apartment (e.g. "Building Common Areas") gets the
+  // Building Controls panel on its home screen instead of only in Settings.
+  bool get _isCommonArea =>
+      (widget.authState.apartmentName ?? '').toLowerCase().contains('common');
 
   // ── Time context ──────────────────────────────────────────────────────────
   static String _greeting() {
@@ -278,6 +284,21 @@ class _DashboardScreenState extends State<DashboardScreen>
                           ),
                         ]),
                       ),
+                      if (_isCommonArea && widget.authState.apartmentId != null) ...[
+                        const SizedBox(height: 12),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
+                          child: _BuildingControlsCard(
+                            onTap: () => Navigator.push(context, MaterialPageRoute(
+                              builder: (_) => BuildingControlsScreen(
+                                authState:     widget.authState,
+                                apartmentId:   widget.authState.apartmentId!,
+                                apartmentName: ApartmentDisplay.label(widget.authState.apartmentName),
+                              ),
+                            )),
+                          ),
+                        ),
+                      ],
                     ],
 
                     // ── Home insights row ────────────────────────────────
@@ -1215,6 +1236,45 @@ class _AtmosphereGrid extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Switch grid
 // ═══════════════════════════════════════════════════════════════════════════════
+
+class _BuildingControlsCard extends StatelessWidget {
+  final VoidCallback onTap;
+  const _BuildingControlsCard({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          colors: [C.accentLo, C.card],
+          begin: Alignment.topLeft, end: Alignment.bottomRight,
+        ),
+        border: Border.all(color: C.accent.withAlpha(90)),
+      ),
+      child: Row(children: [
+        Container(
+          width: 44, height: 44,
+          decoration: BoxDecoration(
+            color: C.accent.withAlpha(30), borderRadius: BorderRadius.circular(14),
+          ),
+          child: const Icon(Icons.domain_rounded, color: C.accent, size: 22),
+        ),
+        const SizedBox(width: 14),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Building Controls',
+              style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700, color: C.textPri)),
+          const SizedBox(height: 3),
+          Text('Christmas mode · sunset & sunrise · smoothness · cooldown · ballast scan',
+              style: AppText.bodySm.copyWith(color: C.textSec)),
+        ])),
+        const Icon(Icons.chevron_right_rounded, color: C.accent),
+      ]),
+    ),
+  );
+}
 
 class _StaffActionButton extends StatelessWidget {
   final IconData icon;

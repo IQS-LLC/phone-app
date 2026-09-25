@@ -125,6 +125,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE     = os.getenv("TIME_ZONE", "UTC")
+# Wall-clock zone the building's admin-set times (sunset/sunrise override)
+# are expressed in — separate from TIME_ZONE so switching it never shifts
+# how anything else is stored/logged. e.g. "Asia/Yerevan".
+BUILDING_TIME_ZONE = os.getenv("BUILDING_TIME_ZONE", TIME_ZONE)
 USE_I18N      = True
 USE_TZ        = True
 
@@ -344,6 +348,13 @@ CELERY_BEAT_SCHEDULE = {
     "check-plc-heartbeat": {
         "task":     "find_device.tasks.check_plc_heartbeat",
         "schedule": crontab(minute="*"),
+        "options":  {"queue": "housekeeping"},
+    },
+    # Sunset/sunrise manual override — only touches apartments where an
+    # admin has explicitly disabled auto mode (see Apartment.auto_sunset_sunrise)
+    "apply-sunset-sunrise-overrides": {
+        "task":     "find_device.tasks.apply_sunset_sunrise_overrides",
+        "schedule": crontab(minute="*/5"),
         "options":  {"queue": "housekeeping"},
     },
     # Archive audit log entries older than 90 days at 02:00 UTC daily

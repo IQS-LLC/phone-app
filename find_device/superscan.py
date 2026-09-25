@@ -61,7 +61,12 @@ MAX_ACTIVE_TESTS_PER_RUN = 60  # generous ceiling; this apartment has ~40 device
 # ParameterList, Global_Version, Global_Variables) is TwinCAT/compiler
 # bookkeeping, never a real device — see project memory on the 454-symbol
 # 2026-08-19 scan for the full inventory this was filtered from.
-DEEP_SCAN_GVLS = frozenset({"gvlDALI", "gvlDALI_State", "gvlController", "gvlCurtain", "GVL"})
+DEEP_SCAN_GVLS = frozenset({
+    "gvlDALI", "gvlDALI_State", "gvlController", "gvlCurtain", "GVL",
+    # Building Common Areas' CX-A6E703 (Runtime 4) uses a different
+    # integrator's naming convention for the same kinds of real I/O.
+    "GVL_DALI", "GVL_Relay", "GVL_Bilding",
+})
 
 # device_type values eligible for an active (write) test — same allowlist
 # commissioning_views.test_io already actuates in production.
@@ -215,6 +220,8 @@ class SuperScanEngine:
             items.append(("window_sensor", str(d.index), "input", "bool", "true=open", d))
         for d in registry.all_motion_sensors():
             items.append(("motion_sensor", str(d.index), "input", "bool", "true=motion", d))
+        for d in registry.all_templated():
+            items.append(("custom", str(d.apartment_device_id), "output", "bool", "true/false", d))
         sec = registry.security()
         if sec is not None:
             items.append(("security", "controller", "both", "bool", "n/a", sec))
@@ -243,6 +250,7 @@ class SuperScanEngine:
             "_var", "_var_level", "_var_set_level", "_var_actual",
             "_var_state", "_var_cmd", "_var_cmd_set",
             "_var_open_btn", "_var_close_btn", "_var_open", "_var_close",
+            "_var_read", "_var_write", "_var_commit",
             "batch_var", "notification_var",
         ):
             val = getattr(obj, attr, None)
@@ -529,14 +537,47 @@ class SuperScanEngine:
 
     # ── deep mode: unmapped raw symbols ─────────────────────────────────────
 
+    def _refresh_discovery_cache(self, plc_device):
+        """
+        Re-enumerate the PLC's live symbol table so Deep mode sees devices
+        wired in since the last scan (new ballasts, new relays) — previously
+        it only read whatever DiscoveryCache a separate /discovery/ scan had
+        left behind, and silently found nothing on a controller that had
+        never been scanned that way. Falls back to the existing cache if
+        the PLC can't be reached right now.
+        """
+        from .discovery.scanner import SymbolScanner
+        from .discovery.classifier import classify_batch
+        try:
+            raw_symbols, duration_ms = SymbolScanner(
+                ip=plc_device.ip_address, ams_net_id=plc_device.ams_net_id,
+                ads_port=plc_device.ads_port,
+                mock=DeviceRegistry.for_apartment(self.apartment.pk).mock,
+            ).scan()
+            symbols_json = [s.to_dict() for s in classify_batch(raw_symbols)]
+            cache, _ = DiscoveryCache.objects.update_or_create(
+                device=plc_device,
+                defaults={
+                    "symbols_json": symbols_json,
+                    "scan_duration_ms": duration_ms,
+                    "symbol_count": len(symbols_json),
+                },
+            )
+            return cache
+        except Exception as exc:
+            logger.warning("SuperScan deep: live symbol refresh failed (%s) — using cached symbols", exc)
+            try:
+                return plc_device.discovery_cache
+            except DiscoveryCache.DoesNotExist:
+                return None
+
     def _deep_unknown_pass(self, known_var_names: set) -> int:
         try:
             plc_device = self.apartment.plc_device
         except Exception:
             return 0
-        try:
-            cache = plc_device.discovery_cache
-        except DiscoveryCache.DoesNotExist:
+        cache = self._refresh_discovery_cache(plc_device)
+        if cache is None:
             return 0
 
         unknown_count = 0

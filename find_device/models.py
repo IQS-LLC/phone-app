@@ -42,6 +42,36 @@ class Apartment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # ── Building-wide admin controls (2026-09-25) ───────────────────────────
+    # Additive, defaults preserve current behavior for every existing row —
+    # only meaningful for a building-wide Apartment (e.g. "Building Common
+    # Areas"), harmless no-ops for a normal tenant apartment. These drive
+    # find_device.tasks.apply_sunset_sunrise_overrides and
+    # find_device.lighting_effects's Christmas chase directly over ADS —
+    # deliberately independent of whatever a PLC's own on-board automation
+    # (e.g. this building's MAIN.fbHttpClientOpenWeatherMap) does, since we
+    # have no visibility into or control over that program's own logic and
+    # won't push unverified TwinCAT changes to real hardware. If the PLC's
+    # own automatic behavior is already working, enabling an override here
+    # will fight it — auto_sunset_sunrise defaults True (app does nothing)
+    # specifically so this never engages until an admin deliberately turns
+    # auto off and sets override times.
+    auto_sunset_sunrise  = models.BooleanField(default=True)
+    sunset_override_time  = models.TimeField(null=True, blank=True)
+    sunrise_override_time = models.TimeField(null=True, blank=True)
+
+    # Client poll interval floor, seconds. AppState's own hardcoded 1s
+    # default (see runtime_config/app_state.dart) is already tuned to the
+    # CX8190's ADS stability limits — this field lets an admin raise it
+    # (never lower below the app's own safety floor) if a particular
+    # building's PLC needs a gentler poll rate.
+    poll_interval_s = models.PositiveIntegerField(default=1)
+
+    # Whether find_device.lighting_effects's Christmas chase is currently
+    # running for this apartment — DB-backed (not just an in-process flag)
+    # so status survives a worker restart and is visible cross-process.
+    christmas_mode_active = models.BooleanField(default=False)
+
     class Meta:
         ordering = ["name"]
 

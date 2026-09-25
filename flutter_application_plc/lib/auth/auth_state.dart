@@ -297,6 +297,43 @@ class AuthState extends ChangeNotifier {
     return null;
   }
 
+  // ── Building-wide admin controls (sunset/sunrise override, poll interval,
+  //    Christmas chase) — Tech Team only, server-side enforced (IsAdminUser).
+
+  Future<Map<String, dynamic>?> getBuildingSettings(int apartmentId) async {
+    final j = _decodeOk(await _request('GET', '/manage/apartments/$apartmentId/building-settings/'));
+    return j?['settings'] as Map<String, dynamic>?;
+  }
+
+  /// Pass only the fields you want to change; omitted keys are left as-is
+  /// server-side. Returns the full updated settings map, or null on failure.
+  Future<Map<String, dynamic>?> updateBuildingSettings(
+    int apartmentId, {
+    bool? autoSunsetSunrise,
+    String? sunsetOverrideTime,  // 'HH:MM' or '' to clear
+    String? sunriseOverrideTime,
+    int? pollIntervalS,
+  }) async {
+    final body = <String, dynamic>{};
+    if (autoSunsetSunrise  != null) body['auto_sunset_sunrise']   = autoSunsetSunrise;
+    if (sunsetOverrideTime != null) body['sunset_override_time']  = sunsetOverrideTime;
+    if (sunriseOverrideTime != null) body['sunrise_override_time'] = sunriseOverrideTime;
+    if (pollIntervalS      != null) body['poll_interval_s']       = pollIntervalS;
+    if (body.isEmpty) return getBuildingSettings(apartmentId);
+    final j = _decodeOk(await _request(
+      'PATCH', '/manage/apartments/$apartmentId/building-settings/', body: jsonEncode(body),
+    ));
+    return j?['settings'] as Map<String, dynamic>?;
+  }
+
+  Future<bool> setChristmasMode(int apartmentId, bool active) async {
+    final resp = await _request(
+      'POST', '/manage/apartments/$apartmentId/christmas-mode/',
+      body: jsonEncode({'active': active}),
+    );
+    return _decodeOk(resp) != null;
+  }
+
   // ── Network discovery ──────────────────────────────────────────────────────
 
   /// Scans configured subnets for live Beckhoff CX controllers. Installer-only

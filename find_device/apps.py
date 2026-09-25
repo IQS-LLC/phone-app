@@ -16,6 +16,12 @@ class FindDeviceConfig(AppConfig):
         # startup doesn't scale and isn't attempted here.
         logger.info("FindDeviceConfig: ready (PLC connections are lazy, per-apartment)")
         self._set_local_ams_address()
+        # Opt-in stand-in for Celery Beat on a single-process server with no
+        # Celery/Redis — see embedded_scheduler's docstring. Never set this
+        # where real Celery Beat runs, or jobs run twice.
+        if os.getenv('LUGH_EMBEDDED_SCHEDULER') == '1':
+            from . import embedded_scheduler
+            embedded_scheduler.start()
 
     def _set_local_ams_address(self):
         """

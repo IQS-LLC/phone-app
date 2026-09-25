@@ -173,6 +173,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // even returns), not poll frequency.
   static const _fastInterval = Duration(seconds: 1);
 
+  // Poll every Nth tick of _fastInterval — set from the server's
+  // poll_interval_s (Apartment.poll_interval_s, admin-configurable).
+  int _cooldownTicks = 1;
+
   // ── Optimistic / pending updates ───────────────────────────────────────────
   // Deliberately in-memory only — never persisted to disk. These represent
   // "requested state" (the user tapped a switch, the write may or may not
@@ -227,7 +231,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       // own value directly would (_failStreak only changes inside _poll(),
       // so skipping forever would never let the skip condition clear).
       _ticksSinceAttempt++;
-      final backoffTicks = _failStreak > 3 ? 3 : 1;
+      final failBackoff  = _failStreak > 3 ? 3 : 1;
+      final backoffTicks = failBackoff > _cooldownTicks ? failBackoff : _cooldownTicks;
       if (_ticksSinceAttempt < backoffTicks) return;
       _ticksSinceAttempt = 0;
       _poll();
@@ -417,6 +422,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final serverReachable = result.success && result.data != null;
     if (serverReachable) {
       _state = SystemState.fromJson(result.data!);
+      // Admin-set per-apartment cooldown (Building Controls). Can only ever
+      // slow polling down from the 1s floor, never speed it past it.
+      final cooldown = (result.data!['poll_interval_s'] as num?)?.toInt() ?? 1;
+      _cooldownTicks = cooldown.clamp(1, 60);
 
       // Clear optimistic updates that the server has confirmed
       _pendingBrightness.removeWhere((ch, pct) => _state.dali[ch] == pct);
@@ -531,9 +540,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _applianceDevices = (data['appliances'] as List<dynamic>? ?? [])
         .map((e) => ApplianceDevice.fromJson(e as Map<String, dynamic>))
         .toList();
-    _toggleDevices = (data['toggles'] as List<dynamic>? ?? [])
-        .map((e) => ToggleDevice.fromJson(e as Map<String, dynamic>))
-        .toList();
+    _toggleDevices = [
+      ...(data['toggles'] as List<dynamic>? ?? [])
+          .map((e) => ToggleDevice.fromJson(e as Map<String, dynamic>)),
+      // Scheme-driven devices (DeviceAddressScheme/TemplatedDevice — e.g. a
+      // building-wide CX added outside any apartment's hardcoded GVL
+      // layout) render through this same list/UI rather than a parallel
+      // one — see ToggleDevice.fromCustomJson and setToggle() below.
+      ...(data['custom'] as List<dynamic>? ?? [])
+          .map((e) => ToggleDevice.fromCustomJson(e as Map<String, dynamic>)),
+    ];
     _doorSensors = (data['door_sensors'] as List<dynamic>? ?? [])
         .map((e) => SensorDevice.fromJson(e as Map<String, dynamic>, 'door'))
         .toList();
@@ -730,7 +746,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
 
     final requestUrl = _api.baseUrl;
-    final result = await _api.setToggle(varName, on);
+    // A scheme-driven ("custom") device writes through a different
+    // endpoint, keyed by apartment_device_id rather than var_name — see
+    // ToggleDevice.fromCustomJson for the 'custom:<id>' key convention.
+    final customId = varName.startsWith('custom:')
+        ? int.tryParse(varName.substring('custom:'.length))
+        : null;
+    final result = customId != null
+        ? await _api.setCustom(customId, on)
+        : await _api.setToggle(varName, on);
     _reportOutcome(requestUrl, result);
     if (!result.success) {
       final msg = result.errorMessage ?? 'Command failed';

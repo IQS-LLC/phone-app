@@ -207,7 +207,13 @@ def get_state(request):
         return err
     try:
         state = r.read_full_state()
-        return JsonResponse({**state, "ts": _ts()})
+        from django.apps import apps
+        Apartment = apps.get_model('find_device', 'Apartment')
+        poll_interval_s = (
+            Apartment.objects.filter(pk=r.apartment_id)
+            .values_list('poll_interval_s', flat=True).first()
+        ) or 1
+        return JsonResponse({**state, "poll_interval_s": poll_interval_s, "ts": _ts()})
     except ConnectionError as exc:
         logger.error("get_state: PLC unreachable: %s", exc)
         return _err(f"PLC unreachable: {exc}", "PLC_ERROR", 503)
@@ -235,6 +241,7 @@ def get_devices(request):
         "door_sensors":   [s.to_dict() for s in r.all_door_sensors()],
         "window_sensors": [s.to_dict() for s in r.all_window_sensors()],
         "motion_sensors": [s.to_dict() for s in r.all_motion_sensors()],
+        "custom":         [d.to_dict() for d in r.all_templated()],
         "security_available": r.security() is not None,
         "rooms":          r.rooms(),
         "ts":             _ts(),
@@ -638,6 +645,39 @@ def set_toggle(request, var_name: str):
         return _err(str(exc), "PLC_ERROR", 503)
     except Exception as exc:
         logger.exception("set_toggle %s", var_name)
+        return _err(str(exc), "SERVER_ERROR", 500)
+
+
+# ── Scheme-driven (custom / TemplatedDevice) ─────────────────────────────────
+
+@csrf_exempt
+@require_POST
+def set_custom(request, apartment_device_id: int):
+    on, err = _parse_bool_param(request.POST, "state")
+    if err:
+        return err
+
+    r, err = _registry_or_error(request)
+    if err:
+        return err
+    err = _require_permission(request, r, "control_devices")
+    if err:
+        return err
+    dev = r.templated(apartment_device_id)
+    if dev is None:
+        return _err(f"Device {apartment_device_id} not configured.", "NOT_FOUND", 404)
+
+    try:
+        dev.write(on)
+        logger.info("Custom device %s → %s", apartment_device_id, "ON" if on else "OFF")
+        log_action(request, "custom_write", apartment_device_id=apartment_device_id, on=on)
+        return _ok({"apartment_device_id": apartment_device_id, "on": on})
+    except ValueError as exc:
+        return _err(str(exc), "NOT_WRITABLE", 409)
+    except ConnectionError as exc:
+        return _err(str(exc), "PLC_ERROR", 503)
+    except Exception as exc:
+        logger.exception("set_custom %s", apartment_device_id)
         return _err(str(exc), "SERVER_ERROR", 500)
 
 
